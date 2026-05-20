@@ -1,0 +1,52 @@
+{
+  "calibrate_cpaf_cancer" : 0,
+  "calibrate_cpaf_cvd" : 0,
+  "cpaf_cancer" : 0.18,
+  "cpaf_cvd" : 0.39,
+  "age_cutoff_cancer" : 40,
+  "age_cutoff_cvd" : 40,
+  "age_cutoff_cancer_high" : 80,
+  "age_cutoff_cvd_high" : 80,
+  "dcost_total_cancer": 23045957724,
+  "icost_total_cancer": 5446264714,
+  "dcost_growth_cancer" : 0.0,
+  "dcost_total_cvd": 26706863966,
+  "icost_total_cvd": 3634921995,
+  "dcost_growth_cvd" : 0.0,
+  "dcost_total_base_year" : 2024,
+
+  "rr" : {
+    "rr_cancer_smoking" : 1.34,
+    "rr_cancer_inactivity" : 1.09,
+    "rr_cancer_bmi" : 1.04,
+    "rr_cancer_alcohol" : 1.042,
+    "rr_cvd_smoking" : 1.85,
+    "rr_cvd_inactivity" : 1.25,
+    "rr_cvd_bmi" : 1.27,
+    "rr_cvd_alcohol" : 1.046
+  },
+  
+  "rr_cancer_diet" : {
+    "fruit"  : 1.004,
+    "wholegrains"  : 1.012,
+    "greens"  : 1.000,
+    "meat"   : 1.021, 
+    "salt" : 1.0
+  },
+  
+  "rr_cvd_diet" : {
+    "fruit"  : 1.029,
+    "wholegrains" : 1.063,
+    "greens" : 1.024,
+    "meat" : 1.078, 
+    "salt" : 1.14
+  },
+
+  "communalities" : {
+    "smoking" : 1.0,
+    "inactivity" : 1.0,
+    "bmi" : 1.0,
+    "alcohol" : 1.0
+  }
+  
+}

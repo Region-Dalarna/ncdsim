@@ -1,0 +1,14 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*\current_simyear.txt
+*\last_simyear.txt
+*\log.txt
+*\ui_status.txt
+*UI/runs/*
+UI/scenarios/*
+Input/bak/*
+scenarios*
+!UI/runs/.gitignore
+!UI/scenarios/.gitignore
