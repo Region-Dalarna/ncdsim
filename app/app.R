@@ -1784,34 +1784,53 @@ server <- function(input, output, session) {
   
   ## Create temporary directories for simulation for session
   session$onFlushed(function() {
-    session_path <- paste0(PROJECTROOT,"/UI/", session_id, "/")
+    
+    session_path <- file.path(tempdir(), session_id)
+    
     for (scen in 1:n_scen_max) {
-      data_path <- paste0(session_path, "runs/scen_", scen, "/data/")
+      
+      data_path <- file.path(session_path, "runs", paste0("scen_", scen), "data")
       dir.create(data_path, recursive = TRUE, showWarnings = FALSE)
+      
       ## Create log file
-        cat(switch(lang,
-                   "eng" = "Waiting to start or load", 
-                   "swe" = "Väntar på att starta eller ladda"),
-            file = paste0(session_path, "runs/scen_", scen, "/log.txt"))
-      }
-    ## Create scenarios folder (only used for baseline csv and json right now)
-    dir.create(paste0(session_path, "scenarios/"), showWarnings = FALSE)
+      cat(
+        switch(lang,
+               "eng" = "Waiting to start or load", 
+               "swe" = "Väntar på att starta eller ladda"
+        ),
+        file = file.path(session_path, "runs", paste0("scen_", scen), "log.txt")
+      )
+      
+    }
+    
+    ## Create scenarios folder
+    dir.create(file.path(session_path, "scenarios"), showWarnings = FALSE)
+    
   })
   
   ## Remove temporary directories and files when session ends
   session$onSessionEnded(function() {
-    session_path <- paste0(PROJECTROOT,"/UI/", session_id, "/")
+    
+    session_path <- file.path(tempdir(), session_id)
     
     ## Stop ongoing simulations
     for (scen in 1:n_scen_max) {
-      scen_path <-  paste0(session_path, "runs/scen_", scen, "/")
-      cat("stop", file = paste0(scen_path, "ui_status.txt"))
+      
+      scen_path <- file.path(session_path, "runs", paste0("scen_", scen))
+      
+      if (dir.exists(scen_path)) {
+        cat("stop", file = file.path(scen_path, "ui_status.txt"))
+      }
+      
     }
+    
     Sys.sleep(3)
+    
     ## Clean up directories and files
     if (dir.exists(session_path)) {
       unlink(session_path, recursive = TRUE, force = TRUE)
-      }
+    }
+    
   })
   
   ## Increase max limit for loading files
@@ -2740,6 +2759,13 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
              file, row.names = FALSE, sep = ";", encoding = "UTF-8")
     }
   )
+  
+  
+  session$onSessionEnded(function() {
+    session_path <- file.path(tempdir(), session_id)
+    unlink(session_path, recursive = TRUE, force = TRUE)
+  })
+  
   
 } # End server
 
