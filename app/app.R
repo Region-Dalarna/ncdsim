@@ -2047,30 +2047,54 @@ server <- function(input, output, session) {
   
   observeEvent(input$button_load_baseline_parameters, {
     
-    ## Try reading parameter file
-    baseline_parameters_tmp_catch <- tryCatch(
-      read_json(input$button_load_baseline_parameters$datapath),
-      error = function(e) {
-        showNotification(paste0(switch(lang,
-                 "eng" = "Problem reading parameter file, error message: ",
-                 "swe" = "Fel vid inläsning av parameterfil, felmeddelande: "
-        ),
-        e$message)) }
-    ) # end tryCatch
+    file <- input$button_load_baseline_parameters
     
-    ## Validate parameters
+    if (is.null(file)) return(NULL)
     
     showNotification(switch(lang,
                             "eng" = "Validating parameters...",
                             "swe" = "Validerar parametrar...")
     )
     
+    baseline_parameters_tmp_catch <- tryCatch({
+      
+      jsonlite::read_json(
+        file$datapath,
+        simplifyVector = TRUE
+      )
+      
+    }, error = function(e) {
+      
+      showNotification(paste0(switch(lang,
+                                     "eng" = "Problem reading parameter file, error message: ",
+                                     "swe" = "Fel vid inläsning av parameterfil, felmeddelande: "
+      ),
+      e$message), type = "error")
+      
+      return(NULL)
+    })
+    
     if (is.null(baseline_parameters_tmp_catch)) return(NULL)
-
-    if (all(names(baseline_parameters_tmp_catch) == all_par_names) == FALSE) {
-      showNotification(switch(lang,
-          "eng" = "Parameter file includes erroneous parameter names",
-          "swe" = "Parameterfilen innehåller felaktiga parameternamn")
+    
+    ## Extra skydd (mycket viktigt!)
+    if (!is.list(baseline_parameters_tmp_catch)) {
+      showNotification(
+        switch(lang,
+               "eng" = "JSON could not be parsed into expected structure",
+               "swe" = "JSON kunde inte tolkas till korrekt struktur"
+        ),
+        type = "error"
+      )
+      return(NULL)
+    }
+    
+    if (!all(names(baseline_parameters_tmp_catch) %in% all_par_names)) {
+      showNotification(
+        switch(lang,
+               "eng" = "Parameter file includes erroneous parameter names",
+               "swe" = "Parameterfilen innehåller felaktiga parameternamn"
+        ),
+        type = "error"
       )
       return(NULL)
     }
@@ -2080,7 +2104,6 @@ server <- function(input, output, session) {
                             "swe" = "Parametrar OK")
     )
     
-    ## Store data as reactive value
     baseline_parameters_tmp(baseline_parameters_tmp_catch)
     
   })
