@@ -156,6 +156,7 @@ simulate_model <- function(
   # if is_baseline = FALSE a .csv file with the same stem name
   # is needed in the same folder.
   # It is saved automatically when a baseline scenario is simulated
+  
   baseline_parameters_path = paste0(PROJECTROOT, 
                                     "/Input/defaults/baseline.json"),
   input_path = paste0(PROJECTROOT, "/Input/"),
@@ -165,7 +166,6 @@ simulate_model <- function(
   
   # The last year of simulation
   endyear = 2030,
-  
   
   
   # Indicates whether output data is written to file
@@ -219,6 +219,11 @@ simulate_model <- function(
   cfact_endyear = 2025
 ) {
   
+  cat("[simulate_model] getwd():", getwd(), "\n")
+  cat("[simulate_model] PROJECTROOT:", PROJECTROOT, "\n")
+  cat("[simulate_model] calibrate exists:", 
+      file.exists(file.path(getwd(), "calibrate.R")), "\n")
+  
   # Assign timestamp to variable in .GlobalEnv to use in validation
   assign("NCDSim_timestamp", timestamp, envir = .GlobalEnv)
   
@@ -231,7 +236,7 @@ simulate_model <- function(
              "swe" = paste0("Startar simulering ", scen_name,
                             " från ", startyear, " till ", endyear, ".\n") 
       ),
-      file=paste0(scen_path, "log.txt"))
+      file = file.path(scen_path, "log.txt"))
   }
   
   ##*****************************************************************************
@@ -722,26 +727,26 @@ simulate_model <- function(
     ## Check whether to stop simulation when running from Shiny
     if (ui == TRUE) {
       t0 <- Sys.time()
-      ui_status <- scan(paste0(scen_path, "ui_status.txt"), what="character")
+      ui_status <- scan(file.path(scen_path, "ui_status.txt"), what = "character", quiet = TRUE)
       if (ui_status == "stop") {
         cat(switch(ui_lang,
                    "eng" = "Simulation stopped\n",
                    "swe" = "Simulering stoppad\n"
         ), 
-        file=paste0(scen_path, "log.txt"),
+        file=file.path(scen_path, "log.txt"),
         append = TRUE)
         stop("Stopped from ui")
       }
       
       ## Write current simulation year to file
-      cat(starttime, file = paste0(scen_path, "current_simyear.txt"))
+      cat(starttime, file = file.path(scen_path, "current_simyear.txt"))
       
       ## Write to log
       cat(switch(ui_lang,
-                 "eng" = paste0("Year ", starttime, " started. "), 
-                 "swe" = paste0("År ", starttime, " påbörjat. ")
+                 "eng" = paste0("Year ", starttime, " started.\n"), 
+                 "swe" = paste0("År ", starttime, " påbörjat.\n")
       ),
-      file=paste0(scen_path, "log.txt"), append = TRUE)
+      file=file.path(scen_path, "log.txt"), append = TRUE)
     }
     
     print(paste0("year: ", starttime))
@@ -758,9 +763,9 @@ simulate_model <- function(
         
         ## Check whether to stop simulation when running from Shiny
         if (ui == TRUE) {
-          ui_status <- scan(paste0(scen_path, "ui_status.txt"), what="character")
+          ui_status <- scan(file.path(scen_path, "ui_status.txt"), what = "character", quiet = TRUE)
           if (ui_status == "stop") {
-            cat("Simulation stopped\n", file=paste0(scen_path, "log.txt"),
+            cat("Simulation stopped\n", file=file.path(scen_path, "log.txt"),
                 append = TRUE)
             stop("Stopped from ui")
           }
@@ -1281,25 +1286,35 @@ simulate_model <- function(
                  "eng" = "Writing data. ", 
                  "swe" = "Skriver data. "
       ),
-      file = paste0(scen_path, "log.txt"), 
+      file = file.path(scen_path, "log.txt"), 
       append = TRUE)
       
       ## Remove data file from previous year if it exists
-      if (file.exists(paste0(scen_path, "data/dat_", starttime - 1, ".rda"))) {
-        file.remove(paste0(scen_path, "data/dat_", starttime - 1, ".rda"))
-      }
+      prev_dat_file <- file.path(scen_path, "data", paste0("dat_", starttime - 1, ".rda"))
+      if (file.exists(prev_dat_file)) file.remove(prev_dat_file)
+      
+      cat(
+        switch(ui_lang,
+               "eng" = paste0("Saving data for year ", starttime, ".\n"),
+               "swe" = paste0("Sparar data för år ", starttime, ".\n")
+        ),
+        file = file.path(scen_path, "log.txt"),
+        append = TRUE
+      )
       
       ## Write latest data
-      save(dat, file = paste0(scen_path, "data/dat_", starttime, ".rda"))
+      current_dat_file <- file.path(scen_path, "data", paste0("dat_", starttime, ".rda"))
+      save(dat, file = current_dat_file)
       
-      cat(starttime, file = paste0(scen_path, "last_simyear.txt"))
+      
+      cat(starttime, file = file.path(scen_path, "last_simyear.txt"))
       
       simyear_timer <- Sys.time() - t0
       cat(switch(ui_lang,
-                 "eng" = paste0("Completed in ", round(simyear_timer, 0), " seconds . \n"), 
-                 "swe" = paste0("Klart efter ", round(simyear_timer, 0), " sekunder . \n") 
+                 "eng" = paste0("Completed in ", round(simyear_timer, 0), " seconds. \n"), 
+                 "swe" = paste0("Klart efter ", round(simyear_timer, 0), " sekunder. \n") 
       ),
-      file = paste0(scen_path, "log.txt"), append = TRUE)
+      file = file.path(scen_path, "log.txt"), append = TRUE)
     }
     
   } # End loop year
@@ -1320,9 +1335,9 @@ simulate_model <- function(
   if (ui == TRUE) {
     cat(switch(ui_lang,
                "eng" = "Simulation completed.",
-               "eng" = "Simulering klar."
+               "swe" = "Simulering klar."
     ), 
-    file = paste0(scen_path, "log.txt"), 
+    file = file.path(scen_path, "log.txt"), 
     append = TRUE)
   }
   

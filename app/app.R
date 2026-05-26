@@ -46,10 +46,52 @@ library(DT)
 library(ggplot2)
 library(plotly)
 
-## Initiate multisession plan, enabling model to be run in separate session
-plan(multisession)
+## Initiate background workers for running the model in separate R processes.
+##
+## OBS: plan(multisession) kan degradera till sekventiell (blockerande) körning
+## när availableCores() == 1, vilket fryser hela Shiny-huvudsessionen under en
+## simulering. En explicit PSOCK-cluster startar alltid separata R-processer och
+## ger garanterat icke-blockerande future({...})-anrop, oberoende av antal
+## detekterade kärnor. Fungerar identiskt på Windows och Linux.
+library(parallel)
+
+## Antal samtidiga simuleringar. Begränsas av antal kärnor (med en kärna kvar
+## åt Shiny-huvudprocessen) och av RAM – varje worker är en egen R-process som
+## laddar data och paket. Sätt MAX_WORKERS_CAP efter tillgängligt minne; med
+## ~2 GB per körning rymmer 8 GB RAM rimligen 2–3 workers utöver huvudprocessen.
+MAX_WORKERS_CAP <- 3
+n_cores <- tryCatch(parallel::detectCores(), error = function(e) 1L)
+if (is.na(n_cores) || n_cores < 1) n_cores <- 1L
+n_workers <- max(1L, min(MAX_WORKERS_CAP, n_cores - 1L))
+
+ncdsim_cluster <- parallel::makeCluster(n_workers)
+plan(cluster, workers = ncdsim_cluster)
+max_jobs <- n_workers   # antal samtidiga simuleringar
+cat("[setup] startar med", n_workers, "worker(s) av", n_cores, "kärnor\n")
+
+## Stäng ned bakgrundsprocesserna när appen avslutas
+onStop(function() {
+  tryCatch(parallel::stopCluster(ncdsim_cluster), error = function(e) NULL)
+})
 
 PROJECTROOT <- getwd()
+
+BASE_TMP <- file.path(tempdir(), "ncdsim")
+# Rensa gamla session-data vid appstart
+if (dir.exists(BASE_TMP)) {
+  unlink(BASE_TMP, recursive = TRUE, force = TRUE)
+}
+dir.create(BASE_TMP, showWarnings = FALSE)
+QUEUE_DIR <- file.path(BASE_TMP, "queue")
+QUEUE_FILE <- file.path(QUEUE_DIR, "queue.csv")
+## Lås per scenario: en fil running_<scen>.txt i RUNNING_DIR. Det gör att flera
+## scenarier kan köra samtidigt (en worker var) utan att blockera varandra.
+RUNNING_DIR <- file.path(QUEUE_DIR, "running")
+
+# Rensa köstatus vid appstart
+if (dir.exists(RUNNING_DIR)) unlink(RUNNING_DIR, recursive = TRUE, force = TRUE)
+dir.create(RUNNING_DIR, recursive = TRUE, showWarnings = FALSE)
+if (file.exists(QUEUE_FILE))   file.remove(QUEUE_FILE)
 
 ## Toggle language in the UI. It can only be set here, not in the GUI.
 # lang <- "eng"
@@ -146,22 +188,22 @@ info_text_smoking <- switch(lang,
 
 label_slider_alcohol <- switch(lang, "eng" = "Alcohol", "swe" = "Alkohol")
 info_text_alcohol <- switch(lang, 
-                        "eng" = "Drinks > 12 g alcohol per day",
-                        "swe" = "Dricker > 12 g alkohol per dag")
+                            "eng" = "Drinks > 12 g alcohol per day",
+                            "swe" = "Dricker > 12 g alkohol per dag")
 
 label_slider_inactivity <- switch(lang,
                                   "eng" = "Insufficient physical activity", 
                                   "swe" = "Otillräcklig fysisk aktivitet")
 
 info_text_inactivity <- switch(lang, 
-                    "eng" = "< 150 minutes moderate physical activity per week",
-                    "swe" = "< 150 minuter måttlig fysisk aktivitet per vecka")
+                               "eng" = "< 150 minutes moderate physical activity per week",
+                               "swe" = "< 150 minuter måttlig fysisk aktivitet per vecka")
 
 label_slider_bmi <- switch(lang, "eng" = "Overweight", "swe" = "Övervikt")
 
 info_text_bmi <- switch(lang, 
-                            "eng" = "BMI > 25",
-                            "swe" = "BMI > 25")
+                        "eng" = "BMI > 25",
+                        "swe" = "BMI > 25")
 
 label_slider_fruit <- switch(lang, "eng" = "Fruit", "swe" = "Frukt")
 info_text_fruit <- switch(lang, 
@@ -241,22 +283,22 @@ ts_group_list <- switch(lang,
 ) # end switch
 
 ts_measure_list <- switch(lang,
-  "eng" = 
-    list("Absolute" = "abs",
-         "Population share" = "pop_share",
-         "Difference vz baseline" = c(
-           "Absolute difference" = "abs_diff",
-           "Relative difference" = "rel_diff",
-           "Absolute difference of population shares" = "abs_diff_pop_share",
-           "Relative difference of population shares" = "rel_diff_pop_share")),
-  "swe" = 
-    list("Absoluta tal" = "abs",
-         "Befolkningsandel" = "pop_share",
-         "Differens gentemot baslinje " = c(
-           "Absolut differens" = "abs_diff",
-           "Relativ differens" = "rel_diff",
-           "Absolut differens av befolkningsandelar" = "abs_diff_pop_share",
-           "Relativ differens av befolkningsandelar" = "rel_diff_pop_share"))
+                          "eng" = 
+                            list("Absolute" = "abs",
+                                 "Population share" = "pop_share",
+                                 "Difference vz baseline" = c(
+                                   "Absolute difference" = "abs_diff",
+                                   "Relative difference" = "rel_diff",
+                                   "Absolute difference of population shares" = "abs_diff_pop_share",
+                                   "Relative difference of population shares" = "rel_diff_pop_share")),
+                          "swe" = 
+                            list("Absoluta tal" = "abs",
+                                 "Befolkningsandel" = "pop_share",
+                                 "Differens gentemot baslinje " = c(
+                                   "Absolut differens" = "abs_diff",
+                                   "Relativ differens" = "rel_diff",
+                                   "Absolut differens av befolkningsandelar" = "abs_diff_pop_share",
+                                   "Relativ differens av befolkningsandelar" = "rel_diff_pop_share"))
 ) # end switch
 
 cs_group_list <- switch(lang,
@@ -278,7 +320,7 @@ acc_group_list <- switch(lang,
                                   "70+ years" = "age_70p",
                                   "16-84 years" = "age_16_84",
                                   "Custom age" = "age_custom")),
-
+                         
                          "swe"= list("Total" = "total", 
                                      "Kön" = "sex",
                                      "Åldersgrupp" = c(
@@ -636,93 +678,90 @@ about_text <- scan(switch(lang,
 
 ################################################################################
 
+
 ## Function for running simulations in a separate R session. It's used both for
 ## baseline simulations (scen == 1) and scenarios
-run_scen <- function(scen, input, sim_status, baseline_active, 
-                     root=PROJECTROOT, session_id) {  
+
+run_scen <- function(scen, params, sim_status, baseline_active, session_id) {  
   
-  ## Require that a baseline is loaded if scenario run
-  if (scen!=1 & baseline_active()!="yes") {
+  ## Require that a baseline is loaded if scenario run.
+  ## OBS: baseline_active får INTE sättas till "running" före denna kontroll,
+  ## annars blir villkoret alltid sant och scenariokörningar avbryts felaktigt.
+  if (scen != 1 & baseline_active() != "yes") {
     showNotification(switch(lang,
-        "eng" = "You need an active baseline to run a scenario simulation",
-        "swe" = "Det krävs en aktiv baslinje för att köra en scenariosimulering"
-    ), duration=3
-    )
+                            "eng" = "You need an active baseline to run a scenario simulation",
+                            "swe" = "Det krävs en aktiv baslinje för att köra en scenariosimulering"
+    ), duration = 3)
     return(NULL)
   }
   
-  ## Extract simulation and intervention years
-  simyears <- input$slider_simyears
-  intervention_years <- input[[paste0("slider_intervention_years_", scen)]]
+  ## Extract simulation and intervention years från sparade params
+  simyears <- params$simyears
+  intervention_years <- params$intervention_years
   
   ## Require that start year is max 2024
   if (simyears[1] > 2024) {
     showNotification(switch(lang,
-                  "eng" = "The simulation must start from year 2024 or earlier",
-                  "swe" = "Simuleringen måste påbörjas år 2024 eller tidigare"
-    ), duration=3
-    )
+                            "eng" = "The simulation must start from year 2024 or earlier",
+                            "swe" = "Simuleringen måste påbörjas år 2024 eller tidigare"
+    ), duration = 3)
     return(NULL)
   }
   
   ## Require at least three simulation years
   if (simyears[2] - simyears[1] < 2) {
     showNotification(switch(lang,
-                    "eng" = "The simulation period must be minimum three years", 
-                    "swe" = "Simuleringsperioden måste vara minst tre år lång"
-    ), duration=3)
+                            "eng" = "The simulation period must be minimum three years", 
+                            "swe" = "Simuleringsperioden måste vara minst tre år lång"
+    ), duration = 3)
     return(NULL)
   }
   
   ## Require that intervention period is at least one year
   if (intervention_years[2] - intervention_years[1] < 1) {
     showNotification(switch(lang,
-                        "eng" = "The phase-in period must be minimum one year", 
-                        "swe" = "Infasningperioden måste vara minst ett år lång"
-    ), duration=3)
+                            "eng" = "The phase-in period must be minimum one year", 
+                            "swe" = "Infasningperioden måste vara minst ett år lång"
+    ), duration = 3)
     return(NULL)
   }
   
   ## Extract paths
-  session_path <- paste0(root, "/UI/", session_id, "/")
+  session_path <- get_session_path(session_id)
   scen_name <- paste0("scen_", scen)
-  scen_path <-  paste0(session_path, "runs/", scen_name, "/")
-  data_path <-  paste0(scen_path, "data/")
-  baseline_path <- paste0(session_path, "scenarios/", input$scen_1_name, "/")
+  scen_path <- file.path(session_path, "runs", scen_name)
+  data_path <- file.path(scen_path, "data")
+  baseline_path <- file.path(session_path, "scenarios", params$scen_1_name)
   
   ## Separate controls if baseline simulation, when scen == 1
-  
   if (scen == 1) {
-    
     ## Create a separate baseline directory if it doesn't exist already
     ## else give a confirmation prompt
     if (file.exists(baseline_path)) {
-      showNotification(switch(lang, 
-                      "eng" = "A baseline folder with that name already exists", 
-                      "swe" = "En baslinjemapp med det namnet existerar redan"
-      ), duration = 5
-      )
-      return(NULL)
+      # showNotification(switch(lang, 
+      #                         "eng" = "A baseline folder with that name already exists", 
+      #                         "swe" = "En baslinjemapp med det namnet existerar redan"
+      # ), duration = 5)
+      # return(NULL)
+      
+      # Rensa gammal baseline-mapp och kör om
+      unlink(baseline_path, recursive = TRUE, force = TRUE)
     }
     
     baseline_active("running")
+    dir.create(baseline_path, recursive = TRUE, showWarnings = FALSE)
     
-    dir.create(baseline_path, recursive = TRUE)
-
     ## Write a json file with the selected parameters
-    ## Note: make scenario names flexible later
     write_json(
-      path = paste0(baseline_path, input$scen_1_name, ".json"),
-      
       x = list(
-        calibrate_cpaf_cancer = as.integer(input$calibrate_cpaf_cancer),
-        calibrate_cpaf_cvd = as.integer(input$calibrate_cpaf_cvd),
-        cpaf_cancer = input$cpaf_cancer,
-        cpaf_cvd = input$cpaf_cvd,
-        age_cutoff_cancer = input$age_cutoff_cancer[1],
-        age_cutoff_cvd = input$age_cutoff_cvd[1],
-        age_cutoff_cancer_high = input$age_cutoff_cancer[2],
-        age_cutoff_cvd_high = input$age_cutoff_cvd[2],
+        calibrate_cpaf_cancer = as.integer(params$calibrate_cpaf_cancer),
+        calibrate_cpaf_cvd = as.integer(params$calibrate_cpaf_cvd),
+        cpaf_cancer = params$cpaf_cancer,
+        cpaf_cvd = params$cpaf_cvd,
+        age_cutoff_cancer = params$age_cutoff_cancer[1],
+        age_cutoff_cvd = params$age_cutoff_cvd[1],
+        age_cutoff_cancer_high = params$age_cutoff_cancer[2],
+        age_cutoff_cvd_high = params$age_cutoff_cvd[2],
         dcost_total_cancer = default_parameters$dcost_total_cancer,
         icost_total_cancer = default_parameters$icost_total_cancer,
         dcost_growth_cancer = default_parameters$dcost_growth_cancer,
@@ -734,86 +773,119 @@ run_scen <- function(scen, input, sim_status, baseline_active,
         rr_cancer_diet = default_parameters$rr_cancer_diet,
         rr_cvd_diet = default_parameters$rr_cvd_diet,
         communalities = default_parameters$communalities
-      ), auto_unbox = TRUE, pretty = TRUE
-    ) # end write_json()
-  } # if (scen == 1) {
+      ),
+      path = file.path(baseline_path, paste0(params$scen_1_name, ".json")),
+      auto_unbox = TRUE,
+      pretty = TRUE
+    )
+    
+  } # if (scen == 1)
   
-  sim_status(replace(sim_status(), scen, "run"))
   showNotification(switch(lang,
                           "eng" = "Starting simulation ...",
                           "swe" = "Startar simulering ..."
-  ), duration=3
-  )
-  cat("run", file = paste0(scen_path, "ui_status.txt"))
-  cat(0, file=paste0(scen_path, "current_simyear.txt"))
-  cat(0, file=paste0(scen_path, "last_simyear.txt"))
-  futureCall(
-    simulate_model, args = list(
-      PROJECTROOT = root,
-      is_baseline = (scen == 1),
-      baseline_parameters = paste0(baseline_path, input$scen_1_name, ".json"),
-      startyear = simyears[1],
-      endyear = simyears[2],
+  ), duration = 3)
+  cat("run", file = file.path(scen_path, "ui_status.txt"))
+  cat(0, file = file.path(scen_path, "current_simyear.txt"))
+  cat(0, file = file.path(scen_path, "last_simyear.txt"))
+  
+  ## Fire-and-forget: vi behåller INTE en referens till futuret och rör det
+  ## aldrig (ingen resolved()/value()). Precis som i den ursprungliga, fungerande
+  ## versionen sköts upptäckten av att jobbet är klart helt av
+  ## datainläsningsobservern (timer_data) som läser .rda-filer från disk. Att
+  ## hålla kvar och inspektera ett ClusterFuture reaktivt kunde frysa eventloopen.
+  future({
+    setwd(PROJECTROOT)
+    source(file.path(PROJECTROOT, "ncdsim.R"), local = FALSE)
+    simulate_model(
+      PROJECTROOT = PROJECTROOT,
+      is_baseline = is_baseline_,
+      baseline_parameters_path = baseline_parameters_path_,
+      startyear = startyear_,
+      endyear = endyear_,
       write_data_to_file = FALSE,
       ui = TRUE,
-      ui_lang = lang,
-      scen_name = scen_name,
-      scen_path = scen_path,
-      cfact = c(
-        cfact_smoking = input[[paste0("cfact_smoking_", scen)]],
-        cfact_alcohol = input[[paste0("cfact_alcohol_", scen)]],
-        cfact_inactivity = input[[paste0("cfact_inactivity_", scen)]],
-        cfact_bmi = input[[paste0("cfact_bmi_", scen)]]
-      ),
-      cfact_food = c(
-        fruit = input[[paste0("cfact_fruit_", scen)]],
-        wholegrains = input[[paste0("cfact_wholegrains_", scen)]],
-        greens = input[[paste0("cfact_greens_", scen)]],
-        meat = input[[paste0("cfact_meat_", scen)]],
-        salt = input[[paste0("cfact_salt_", scen)]]
-      ),
-      cfact_startyear = intervention_years[1],
-      cfact_endyear = intervention_years[2]
+      ui_lang = ui_lang_,
+      scen_name = scen_name_,
+      scen_path = scen_path_,
+      cfact = cfact_,
+      cfact_food = cfact_food_,
+      cfact_startyear = cfact_startyear_,
+      cfact_endyear = cfact_endyear_
     )
-  )
-  NULL
+  }, globals = list(
+    PROJECTROOT = PROJECTROOT,
+    is_baseline_ = (scen == 1),
+    baseline_parameters_path_ = file.path(baseline_path, paste0(params$scen_1_name, ".json")),
+    startyear_ = simyears[1],
+    endyear_ = simyears[2],
+    ui_lang_ = lang,
+    scen_name_ = scen_name,
+    scen_path_ = scen_path,
+    cfact_ = c(
+      cfact_smoking = params$cfact_smoking,
+      cfact_alcohol = params$cfact_alcohol,
+      cfact_inactivity = params$cfact_inactivity,
+      cfact_bmi = params$cfact_bmi
+    ),
+    cfact_food_ = c(
+      fruit = params$cfact_fruit,
+      wholegrains = params$cfact_wholegrains,
+      greens = params$cfact_greens,
+      meat = params$cfact_meat,
+      salt = params$cfact_salt
+    ),
+    cfact_startyear_ = intervention_years[1],
+    cfact_endyear_ = intervention_years[2]
+  ),
+  packages = c("data.table"))
+  return(TRUE)
 } # end run_scen()
 
 ## Function for clearing a scenario
-clear_scen <- function(scen, input, sim_status, dat_base, baseline_active, 
-                       root=PROJECTROOT, session_id) {
+clear_scen <- function(scen, input, sim_status, dat_base, baseline_active, session_id) {
   showNotification(paste0(switch(lang,
                                  "eng" = "Stopping/clearing scenario ", 
                                  "swe" = "Stoppar/rensar scenario "),  
-    scen, "..."), duration=3)
-  session_path <- paste0(root, "/UI/", session_id, "/")
-  scen_path <-  paste0(session_path, "runs/scen_", scen, "/")
-  cat("stop", file = paste0(scen_path, "ui_status.txt"))
+                          scen, "..."), duration=3)
+  
+  
+  session_path <- get_session_path(session_id)
+  scen_path <- file.path(session_path, "runs", paste0("scen_", scen))
+  
+  if (dir.exists(scen_path)) {
+    cat("stop", file = file.path(scen_path, "ui_status.txt"))
+  }
+  
   sim_status(replace(sim_status(), scen, "stop"))
+  
   ## Remove any .rda files from simulations, ignore warning if there was no file
-  system(paste0("rm ", scen_path, "data/*.rda"), ignore.stderr = TRUE)
+  system(paste0("rm ", file.path(scen_path, "data", "*.rda")), ignore.stderr = TRUE)
   dat_base[[paste0("scen_", scen)]] <- NULL
   
   ## Remove baseline data, reset baseline controls and clear all scenarios if 
   ## baseline is cleared
   if (scen == 1) {
-    if (file.exists(paste0(session_path, "scenarios/", input$scen_1_name))) {
-      system(paste0("rm -r ", session_path, "scenarios/", input$scen_1_name, "/"))
+    
+    baseline_path <- file.path(session_path, "scenarios", input$scen_1_name)
+    
+    if (dir.exists(baseline_path)) {
+      system(paste0("rm -r ", baseline_path))
     }
     
     reset("scen_1_name")
     reset("button_load_baseline_data")
     reset("button_load_baseline_parameters")
     disable("button_apply_loaded_baseline")
+    
     for (i in 1:length(baseline_slider_names)) {
       reset(baseline_slider_names[i])
     }
-    sapply(2:n_scen_max, clear_scen, sim_status = sim_status, 
-           dat_base = dat_base, baseline_active = baseline_active, root = root,
-           session_id = session_id)
-    baseline_active("no")
+    
   } else if (scen %in% 2:n_scen_max) {
+    
     reset(paste0("scen_", scen, "_name"))
+    
     for (i in 1:length(scenario_slider_names)) {
       reset(paste0(scenario_slider_names[i], scen))
     }
@@ -827,8 +899,8 @@ load_scen <- function(scen, input, sim_status, dat_base) {
   ## Check that there is not an ongoing simulation 
   if (sim_status()[[scen]] %in% c("run", "active")) {
     showNotification(switch(lang,
-                "eng" = "Stop/clear current scenario before loading from file",
-                "swe" = "Stoppa/rensa nuvarande scenario innan du laddar från fil"
+                            "eng" = "Stop/clear current scenario before loading from file",
+                            "swe" = "Stoppa/rensa nuvarande scenario innan du laddar från fil"
     )
     )
     return(NULL)
@@ -840,8 +912,8 @@ load_scen <- function(scen, input, sim_status, dat_base) {
     fread(file$datapath, sep = ";", header=TRUE),
     error = function(e) {
       showNotification(paste0(switch(lang,
-                       "eng" = "Problem reading data, error message: ",
-                       "swe" = "Problem med att läsa in data, felmeddelande: "
+                                     "eng" = "Problem reading data, error message: ",
+                                     "swe" = "Problem med att läsa in data, felmeddelande: "
       ),
       e$message)) }
   ) # end tryCatch
@@ -850,8 +922,8 @@ load_scen <- function(scen, input, sim_status, dat_base) {
   
   if (all(colnames(dat) == all_var_names) == FALSE) {
     showNotification(switch(lang,
-              "eng" = "Variable names of data not matching NCD-SIM output data",
-              "swe" = "Variabelnamn i data matchar inte utdata från NCD-SIM"
+                            "eng" = "Variable names of data not matching NCD-SIM output data",
+                            "swe" = "Variabelnamn i data matchar inte utdata från NCD-SIM"
     )
     )
     return(NULL)
@@ -885,12 +957,21 @@ load_scen <- function(scen, input, sim_status, dat_base) {
 } # end load_scen
 
 ## Function for scanning a simulation log file, returning its contents
-scan_log <- function(scen, root = PROJECTROOT, session_id) {
-  log_path <- paste0(root, "/UI/", session_id, "/runs/scen_", scen, "/log.txt")
+scan_log <- function(scen, session_id) {
+  session_path <- get_session_path(session_id)
+  log_path <- file.path(session_path, "runs", paste0("scen_", scen), "log.txt")
+  
+  # cat("[scan_log] scen:", scen, "\n")
+  # cat("[scan_log] log_path:", log_path, "\n")
+  # cat("[scan_log] exists:", file.exists(log_path), "\n")
+  # 
   if (file.exists(log_path)) {
-    paste(scan(file = log_path,
-               what="character", sep="\n", quiet = TRUE), collapse="\n")
+    txt <- paste(scan(file = log_path, what = "character", sep = "\n", quiet = TRUE), collapse = "\n")
+    #cat("[scan_log] nchar:", nchar(txt), "\n")
+    return(txt)
   }
+  
+  return(NULL)
 }
 
 ## Function for creating plots by aggregating and modifying the raw
@@ -911,8 +992,8 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
   
   if (measure %in% c("abs_diff", "rel_diff", "abs_diff_pop_share", "rel_diff_pop_share") & n_scen<2) {
     showNotification(switch(lang,
-          "eng" = "Please load a comparison scenario", 
-          "swe" = "Du behöver ladda ett jämförelsescenario för denna diagramtyp"
+                            "eng" = "Please load a comparison scenario", 
+                            "swe" = "Du behöver ladda ett jämförelsescenario för denna diagramtyp"
     ), duration = 3
     )
     measure <- "abs"
@@ -924,7 +1005,7 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
   ## cvd, as that would double count those with comorbidity. We start by 
   ## defining total flow for comorbidity, to be added to those for cancer and 
   ## cvd separately, respectively
-
+  
   dat_wide[, new_cases_comorb := f_pop_comorb + f_immig_comorb + 
              f_cancer_comorb + f_cvd_comorb]
   ## Rename the following vars for consistency with other variable names
@@ -1043,7 +1124,7 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
   } else if (group == "age_custom") {
     dat_long <- dat_long[age %between% age_limits_custom]
     dat_long <- dat_long[, group := paste0(age_limits_custom[1], 
-       "-", age_limits_custom[2], " years")]
+                                           "-", age_limits_custom[2], " years")]
     if (lang == "swe") {
       dat_long[, group := sub("years", "år", group)]
     }
@@ -1066,8 +1147,8 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
   } else if (plot_type == "acc") {
     
     dat_by_group <- dat_long[year %in% years[1]:years[2], 
-                            .(value = sum(value, na.rm = TRUE)), 
-                            by = c("scen_id", "scen_name", "group", "variable")]
+                             .(value = sum(value, na.rm = TRUE)), 
+                             by = c("scen_id", "scen_name", "group", "variable")]
   }
   
   ## Customize plot objects to group
@@ -1093,7 +1174,7 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
                                                      "-",
                                                      age_limits_custom[2],
                                                      " years.")
-                               ),
+                          ),
                         "swe" = 
                           list("total" = "Hela befolkningen.",
                                "sex" = "Per kön.",
@@ -1105,7 +1186,7 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
                                                      "-",
                                                      age_limits_custom[2],
                                                      " år.")
-                                                     )
+                          )
   ) # end switch                     
   
   ylim_custom <- c(0, NA)
@@ -1147,12 +1228,12 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
                             "swe" = "Fall per tusen invånare")
       format_fun <- int_print
     } else if (var_to_plot %in% c(
-                                  "deaths_ncd",
-                                  "deaths_cancer",
-                                  "deaths_cvd",
-                                  "deaths_total",
-                                  "deaths_comorb"
-                                  )
+      "deaths_ncd",
+      "deaths_cancer",
+      "deaths_cvd",
+      "deaths_total",
+      "deaths_comorb"
+    )
     ) {
       dat_by_group[variable == var_to_plot, value := value * 10^3]
       ylab_custom <- switch(lang,
@@ -1188,8 +1269,8 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
     ylim_custom <- c(NA, NA)
     line_colours <- line_colours[-1]
     ylab_custom <- paste0(ylab_custom, switch(lang,
-                                          "eng" = ", scenario minus baseline",
-                                          "swe" = ", scenario minus baslinje"
+                                              "eng" = ", scenario minus baseline",
+                                              "swe" = ", scenario minus baslinje"
     )
     )
   }
@@ -1208,8 +1289,8 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
     ylim_custom <- c(NA, NA)
     line_colours <- line_colours[-1]
     ylab_custom <- paste0(ylab_custom, switch(lang,
-                                        "eng" = ", scenario to baseline ratio",
-                                        "swe" = ", kvot scenario/baslinje"
+                                              "eng" = ", scenario to baseline ratio",
+                                              "swe" = ", kvot scenario/baslinje"
     )
     )
   }
@@ -1232,9 +1313,9 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
     ylim_custom <- c(NA, NA)
     line_colours <- line_colours[-1]
     ylab_custom <- paste0(ylab_custom, switch(lang,
-                  "eng" = ", scenario minus baseline, population shares",
-                  "swe" = ", scenario minus baslinje, befolkningsandelar"
-      )
+                                              "eng" = ", scenario minus baseline, population shares",
+                                              "swe" = ", scenario minus baslinje, befolkningsandelar"
+    )
     )
   }
   
@@ -1256,9 +1337,9 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
     ylim_custom <- c(NA, NA)
     line_colours <- line_colours[-1]
     ylab_custom <- paste0(ylab_custom, switch(lang,
-                    "eng" = ", scenario to baseline ratio of population shares",
-                    "swe" = ", kvot scenario/baslinje, befolkningsandelar"
-      )
+                                              "eng" = ", scenario to baseline ratio of population shares",
+                                              "swe" = ", kvot scenario/baslinje, befolkningsandelar"
+    )
     )
   }
   
@@ -1280,14 +1361,14 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
   
   if (plot_type %in% c("ts", "cs")) {
     dat_to_plot[, hover_label := paste0(scen_name,
-                                      hover_pre_group, group,
-                                      hover_pre_year, year,
-                                      hover_pre_value, sapply(value, format_fun)
+                                        hover_pre_group, group,
+                                        hover_pre_year, year,
+                                        hover_pre_value, sapply(value, format_fun)
     )]
   } else if (plot_type == c("acc")) {
     dat_to_plot[, hover_label := paste0(scen_name,
-                                      hover_pre_group, group,
-                                      hover_pre_value, sapply(value, format_fun)
+                                        hover_pre_group, group,
+                                        hover_pre_value, sapply(value, format_fun)
     )]
   }
   
@@ -1364,6 +1445,154 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
   return(plot_tmp)
 } # end function create_plot()
 
+
+get_session_path <- function(session_id) {
+  file.path(BASE_TMP, session_id)
+}
+
+init_queue <- function() {
+  dir.create(QUEUE_DIR, recursive = TRUE, showWarnings = FALSE)
+  if (!file.exists(QUEUE_FILE)) {
+    data.table::fwrite(
+      data.table::data.table(
+        job_id = character(),
+        session_id = character(),
+        scen = integer(),
+        created = character()
+      ),
+      QUEUE_FILE
+    )
+  }
+}
+
+# Uppdatera enqueue_job att spara params:
+enqueue_job <- function(session_id, scen, params) {
+  init_queue()
+  job_id <- paste(session_id, scen, as.numeric(Sys.time()), sep = "_")
+  saveRDS(params, file.path(QUEUE_DIR, paste0(job_id, ".rds")))
+  
+  q <- data.table::fread(QUEUE_FILE)
+  q <- rbind(q, data.table::data.table(
+    job_id = job_id, session_id = session_id,
+    scen = scen, created = as.character(Sys.time())
+  ), fill = TRUE)
+  data.table::fwrite(q, QUEUE_FILE)
+  job_id
+}
+
+dequeue_job <- function(job_id) {
+  if (!file.exists(QUEUE_FILE)) return(NULL)
+  q <- data.table::fread(QUEUE_FILE)
+  q <- q[q$job_id != job_id, ]
+  data.table::fwrite(q, QUEUE_FILE)
+}
+
+queue_position <- function(job_id) {
+  if (!file.exists(QUEUE_FILE)) return(NA_integer_)
+  q <- data.table::fread(QUEUE_FILE)
+  pos <- match(job_id, q$job_id)
+  if (is.na(pos)) return(NA_integer_)
+  pos
+}
+
+head_job <- function() {
+  if (!file.exists(QUEUE_FILE)) return(NULL)
+  q <- data.table::fread(QUEUE_FILE)
+  if (nrow(q) == 0) return(NULL)
+  q[1, ]
+}
+
+# Hur länge (sekunder) ett "running"-lås får vara innan det betraktas som
+# kvarglömt (stale) efter en krasch. Sätt högre än längsta rimliga körtid för
+# en simulering, med god marginal, så att ett aktivt jobb aldrig avbryts.
+RUNNING_STALE_SECONDS <- 30 * 60   # 30 minuter
+
+# Lås per scenario. Varje fil innehåller två rader: job_id och en epoch-
+# tidsstämpel (sekunder). Tidsstämpeln skrivs in i filen i stället för att
+# förlita sig på filsystemets mtime, vilket gör stale-detekteringen oberoende
+# av Sys.setFileTime-egenheter.
+running_file <- function(scen) {
+  file.path(RUNNING_DIR, paste0("running_", scen, ".txt"))
+}
+
+# Läs tidsstämpeln (rad 2) ur en scens låsfil. NA om den saknas/är trasig.
+read_running_time <- function(scen) {
+  rf <- running_file(scen)
+  if (!file.exists(rf)) return(NA_real_)
+  lines <- tryCatch(readLines(rf, warn = FALSE),
+                    error = function(e) character(0))
+  if (length(lines) < 2) return(NA_real_)
+  suppressWarnings(as.numeric(lines[2]))
+}
+
+# Kör scenariot 'scen'? Rensar automatiskt kvarglömda (stale) lås.
+is_running <- function(scen) {
+  rf <- running_file(scen)
+  if (!file.exists(rf)) return(FALSE)
+  
+  ts <- read_running_time(scen)
+  if (is.na(ts)) {
+    file.remove(rf)
+    return(FALSE)
+  }
+  
+  age <- as.numeric(Sys.time()) - ts
+  if (age > RUNNING_STALE_SECONDS) {
+    cat("[is_running] kvarglömt lås för scen", scen, "(", round(age), "s) – rensar\n")
+    file.remove(rf)
+    return(FALSE)
+  }
+  
+  TRUE
+}
+
+# Antal scenarier som kör just nu (efter att stale-lås rensats av is_running).
+n_running <- function() {
+  files <- list.files(RUNNING_DIR, pattern = "^running_[0-9]+\\.txt$")
+  if (length(files) == 0) return(0L)
+  scens <- as.integer(sub("running_([0-9]+)\\.txt", "\\1", files))
+  sum(vapply(scens, is_running, logical(1)))
+}
+
+set_running <- function(scen, job_id) {
+  writeLines(c(job_id, format(as.numeric(Sys.time()), scientific = FALSE)),
+             running_file(scen))
+}
+
+# Förläng låset medan ett jobb fortfarande kör (bevarar job_id).
+touch_running <- function(scen) {
+  rf <- running_file(scen)
+  if (!file.exists(rf)) return(invisible(NULL))
+  lines <- tryCatch(readLines(rf, warn = FALSE), error = function(e) character(0))
+  job_id <- if (length(lines) >= 1) lines[1] else ""
+  writeLines(c(job_id, format(as.numeric(Sys.time()), scientific = FALSE)), rf)
+}
+
+clear_running <- function(scen) {
+  rf <- running_file(scen)
+  if (file.exists(rf)) file.remove(rf)
+}
+
+# för att skapa en progressbar
+get_progress <- function(scen, session_id, startyear, endyear) {
+  
+  session_path <- get_session_path(session_id)
+  scen_path <- file.path(session_path, "runs", paste0("scen_", scen))
+  current_file <- file.path(scen_path, "current_simyear.txt")
+  
+  if (!file.exists(current_file)) return(0)
+  
+  current <- suppressWarnings(as.numeric(readLines(current_file, warn = FALSE)[1]))
+  if (is.na(current)) return(0)
+  
+  total <- endyear - startyear
+  if (total <= 0) return(0)
+  
+  progress <- (current - startyear) / total
+  
+  max(0, min(progress, 1))
+}
+
 ################################################################################
 ## UI
 ################################################################################
@@ -1376,6 +1605,16 @@ ui <- fluidPage(
   tags$head(tags$style("h5 {color:#009F80;}")),
   tags$head(tags$style("a {color:#009F80}")),
   tags$style(HTML(".panel-title {font-size: 13px;}")),
+  tags$head(
+    tags$script(HTML("
+    Shiny.addCustomMessageHandler('scroll-log', function(id) {
+      var el = document.getElementById(id);
+      if(el){
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+  "))
+  ),
   
   # Application title
   titlePanel("NCD-SIM"),
@@ -1388,7 +1627,7 @@ ui <- fluidPage(
                    ## Text input for custom scenario name 
                    tabPanel(uiOutput("baseline_header"),
                             
-                        tags$style(HTML("
+                            tags$style(HTML("
         .label-left .form-group {
           display: flex;              /* Use flexbox for positioning children */
           flex-direction: row;        /* Place children on a row (default) */
@@ -1407,59 +1646,59 @@ ui <- fluidPage(
           width: 275px;          /* Target width for slider */
         }
         "
-                        )),
+                            )),
                             
-  ## File input for loading pre-simulated baseline data
-  h5(switch(lang, 
-            "eng" = "Load baseline from file", 
-            "swe" = "Ladda baslinje från fil"),
-     info_icon(switch(lang, 
-                      "eng" = "Load pre-simulated baseline data (.csv) and matching parameters (.json)",
-                      "swe" = "Ladda data (.csv) och matchande parametrar (.json) för en försimulad baslinje"))
-     ),
-  
-  wellPanel(style = "padding: 5px; margin-bottom: 20px",
-  div(style = "margin-bottom: 0px", fileInput("button_load_baseline_data", 
-            label=NULL, accept=".csv", placeholder = switch(lang,
-                                                "eng" = "Data file (.csv)",
-                                                "swe" = "Datafil (.csv)"))),
-
-  div(style = "margin-bottom: -15px; margin-top: -20px",
-          fileInput("button_load_baseline_parameters", 
-            label=NULL, accept=".json", placeholder = switch(lang,
-                                              "eng" = "Parameter file (.json)",
-                                              "swe" = "Parameterfil (.json)"))),
-  
-  actionButton("button_clear_loaded_baseline", 
-                        label=switch(lang,
-                                     "eng" = "Clear",
-                                     "swe" = "Rensa")),
-  disabled(actionButton("button_apply_loaded_baseline", 
-               label=switch(lang,
-                                 "eng" = "Apply baseline",
-                                 "swe" = "Tillämpa baslinje")))
-  ),
-  
-################################################################################
-  
-  h5(switch(lang, 
-            "eng" = "Baseline name", 
-            "swe"= "Baslinjenamn"), 
-     info_icon(switch(lang, 
-      "eng" = "Choose a custom name for the baseline", 
-      "swe"= "Välj namn för baslinjen")
-     )),
-  
-                    textInput("scen_1_name", label = NULL, value = "baseline"),
+                            ## File input for loading pre-simulated baseline data
+                            h5(switch(lang, 
+                                      "eng" = "Load baseline from file", 
+                                      "swe" = "Ladda baslinje från fil"),
+                               info_icon(switch(lang, 
+                                                "eng" = "Load pre-simulated baseline data (.csv) and matching parameters (.json)",
+                                                "swe" = "Ladda data (.csv) och matchande parametrar (.json) för en försimulad baslinje"))
+                            ),
+                            
+                            wellPanel(style = "padding: 5px; margin-bottom: 20px",
+                                      div(style = "margin-bottom: 0px", fileInput("button_load_baseline_data", 
+                                                                                  label=NULL, accept=".csv", placeholder = switch(lang,
+                                                                                                                                  "eng" = "Data file (.csv)",
+                                                                                                                                  "swe" = "Datafil (.csv)"))),
+                                      
+                                      div(style = "margin-bottom: -15px; margin-top: -20px",
+                                          fileInput("button_load_baseline_parameters", 
+                                                    label=NULL, accept=".json", placeholder = switch(lang,
+                                                                                                     "eng" = "Parameter file (.json)",
+                                                                                                     "swe" = "Parameterfil (.json)"))),
+                                      
+                                      actionButton("button_clear_loaded_baseline", 
+                                                   label=switch(lang,
+                                                                "eng" = "Clear",
+                                                                "swe" = "Rensa")),
+                                      disabled(actionButton("button_apply_loaded_baseline", 
+                                                            label=switch(lang,
+                                                                         "eng" = "Apply baseline",
+                                                                         "swe" = "Tillämpa baslinje")))
+                            ),
+                            
+                            ################################################################################
+                            
+                            h5(switch(lang, 
+                                      "eng" = "Baseline name", 
+                                      "swe"= "Baslinjenamn"), 
+                               info_icon(switch(lang, 
+                                                "eng" = "Choose a custom name for the baseline", 
+                                                "swe"= "Välj namn för baslinjen")
+                               )),
+                            
+                            textInput("scen_1_name", label = NULL, value = "baseline"),
                             
                             ## Slider input for simulation period
-                        h5(switch(lang, 
-                                  "eng" = "Simulation period", 
-                                  "swe"= "Simuleringsperiod"),
+                            h5(switch(lang, 
+                                      "eng" = "Simulation period", 
+                                      "swe"= "Simuleringsperiod"),
                                info_icon(
                                  switch(lang, 
-          "eng" = "Choose start year (<= 2024) and end year for new simulation", 
-          "swe"= "Välj startår (<= 2024) och slutår för ny simulering")
+                                        "eng" = "Choose start year (<= 2024) and end year for new simulation", 
+                                        "swe"= "Välj startår (<= 2024) och slutår för ny simulering")
                                )),
                             
                             sliderInput(
@@ -1479,52 +1718,52 @@ ui <- fluidPage(
                                info_icon(risk_factor_info_text)
                             ),
                             
-bsCollapse(id = "risk-factors-baseline",
-           bsCollapsePanel(switch(lang, 
-                                  "eng" = "(+) Non-dietary", 
-                                  "swe"= "(+) Icke-kost"),
-                           
-                           risk_factor_slider("cfact_smoking_1",
-                                              label = label_slider_smoking,
-                                              info_text = info_text_smoking
-                           ),
-                           risk_factor_slider("cfact_alcohol_1",
-                                              label = label_slider_alcohol,
-                                              info_text = info_text_alcohol
-                           ),
-                           risk_factor_slider("cfact_inactivity_1",
-                                              label = label_slider_inactivity, 
-                                              info_text = info_text_inactivity 
-                           ),
-                           risk_factor_slider("cfact_bmi_1",
-                                              label = label_slider_bmi,
-                                              info_text = info_text_bmi
-                           )
-           ), # end bsCollapsePanel("Non-dietary"
-           bsCollapsePanel(switch(lang, 
-                                  "eng" = "(+) Dietary", 
-                                  "swe"= "(+) Kost"),
-                           
-                           risk_factor_slider("cfact_fruit_1",
-                                              label = label_slider_fruit,
-                                              info_text = info_text_fruit
-                           ),
-                           risk_factor_slider("cfact_wholegrains_1",
-                                              label = label_slider_wholegrains,
-                                              info_text = info_text_wholegrains
-                           ),
-                           risk_factor_slider("cfact_greens_1",
-                                              label = label_slider_greens,
-                                              info_text = info_text_greens
-                           ),
-                           risk_factor_slider("cfact_meat_1",
-                                              label = label_slider_meat,
-                                              info_text = info_text_meat
-                           ),
-                           risk_factor_slider("cfact_salt_1",
-                                              label = label_slider_salt,
-                                              info_text = info_text_salt
-                           )
+                            bsCollapse(id = "risk-factors-baseline",
+                                       bsCollapsePanel(switch(lang, 
+                                                              "eng" = "(+) Non-dietary", 
+                                                              "swe"= "(+) Icke-kost"),
+                                                       
+                                                       risk_factor_slider("cfact_smoking_1",
+                                                                          label = label_slider_smoking,
+                                                                          info_text = info_text_smoking
+                                                       ),
+                                                       risk_factor_slider("cfact_alcohol_1",
+                                                                          label = label_slider_alcohol,
+                                                                          info_text = info_text_alcohol
+                                                       ),
+                                                       risk_factor_slider("cfact_inactivity_1",
+                                                                          label = label_slider_inactivity, 
+                                                                          info_text = info_text_inactivity 
+                                                       ),
+                                                       risk_factor_slider("cfact_bmi_1",
+                                                                          label = label_slider_bmi,
+                                                                          info_text = info_text_bmi
+                                                       )
+                                       ), # end bsCollapsePanel("Non-dietary"
+                                       bsCollapsePanel(switch(lang, 
+                                                              "eng" = "(+) Dietary", 
+                                                              "swe"= "(+) Kost"),
+                                                       
+                                                       risk_factor_slider("cfact_fruit_1",
+                                                                          label = label_slider_fruit,
+                                                                          info_text = info_text_fruit
+                                                       ),
+                                                       risk_factor_slider("cfact_wholegrains_1",
+                                                                          label = label_slider_wholegrains,
+                                                                          info_text = info_text_wholegrains
+                                                       ),
+                                                       risk_factor_slider("cfact_greens_1",
+                                                                          label = label_slider_greens,
+                                                                          info_text = info_text_greens
+                                                       ),
+                                                       risk_factor_slider("cfact_meat_1",
+                                                                          label = label_slider_meat,
+                                                                          info_text = info_text_meat
+                                                       ),
+                                                       risk_factor_slider("cfact_salt_1",
+                                                                          label = label_slider_salt,
+                                                                          info_text = info_text_salt
+                                                       )
                                        ) # end bsCollapsePanel("Dietary"
                             ), # end bsCollapse(id = "risk-factors-baseline"
                             
@@ -1533,8 +1772,8 @@ bsCollapse(id = "risk-factors-baseline",
                                       "eng" = "Phase-in period", 
                                       "swe"= "Infasningsperiod"),
                                info_icon(switch(lang, 
-                                              "eng" = "Changes in the size of the risk groups are phased in linearly during this period and remain thereafter", 
-                                              "swe"= "Förändringar i storleken på riskgrupperna fasas in linjärt under denna period och kvarstår därefter"))
+                                                "eng" = "Changes in the size of the risk groups are phased in linearly during this period and remain thereafter", 
+                                                "swe"= "Förändringar i storleken på riskgrupperna fasas in linjärt under denna period och kvarstår därefter"))
                             ),
                             
                             sliderInput(
@@ -1551,79 +1790,79 @@ bsCollapse(id = "risk-factors-baseline",
                             h5(switch(lang, 
                                       "eng" = "Advanced options", 
                                       "swe"= "Avancerade inställningar"),
-         info_icon(switch(lang, 
-          "eng" = "Click to expand and use sliders to adjust", 
-          "swe"= "Klicka för att expandera och använd reglagen för att justera")
+                               info_icon(switch(lang, 
+                                                "eng" = "Click to expand and use sliders to adjust", 
+                                                "swe"= "Klicka för att expandera och använd reglagen för att justera")
                                )),
-
-
                             
-bsCollapse(id = "advanced-options",
-   bsCollapsePanel(switch(lang, 
-                          "eng" = "(+) Advanced options", 
-                          "swe"= "(+) Avancerade inställningar"),
-                   
-                   checkboxInput(inputId = "calibrate_cpaf_cancer",
-                                 label = switch(lang,
-                                  "eng" = span(tags$b("Calibrate risk factor importance to cancer"),
-                                               info_icon("Enable to set the share of cancer accounted for by the risk factors in the model")),
-                                  "swe" = span(tags$b("Kalibrera riskfaktorers betydelse för cancer"),
-                                               info_icon("Slå på för att bestämma andelen av cancer som tillskrivs modellens riskfaktorer")),
-                                 )),
-                   
-                   sliderInput(
-                     "cpaf_cancer",
-                     label = NULL,
-                     min = 0,
-                     max = 1.0,
-                     value = default_parameters$cpaf_cancer,
-                     step = 0.01),
-                   
-                   checkboxInput(inputId = "calibrate_cpaf_cvd",
-                                 label = switch(lang,
-                                    "eng" = span(tags$b("Calibrate risk factor importance to cvd"),
-                                                 info_icon("Enable to set the share of cvd accounted for by the risk factors in the model")),
-                                    "swe" = span(tags$b("Kalibrera riskfaktorers betydelse för hjärt-kärlsjukdom"),
-                                                 info_icon("Slå på för att bestämma andelen av hjärt-kärlsjukdom som tillskrivs modellens riskfaktorer")),
-                                 )),
-
-                   sliderInput(
-                     inputId = "cpaf_cvd",
-                     label = NULL,
-                     min = 0,
-                     max = 1.0,
-                     value = default_parameters$cpaf_cvd,
-                     step = 0.01),
-                   
-                   sliderInput(
-                     inputId = "age_cutoff_cancer",
-                     label = switch(lang,
-                                    "eng" = span("Age interval for cancer risk",
-                                                 info_icon("Cancer is affected by risk factors within this age interval")),
-                                    "swe" = span("Åldersintervall för cancerrisk",
-                                                 info_icon("Cancer påverkas av riskfaktorer inom detta åldersintervall")),
-                     ), # end switch
-                     min = 0,
-                     max = 100,
-                     value = c(default_parameters$age_cutoff_cancer, 
-                               default_parameters$age_cutoff_cancer_high),
-                     step = 1),
-                   
-                   sliderInput(
-                     inputId = "age_cutoff_cvd",
-                     label = switch(lang,
-                                    "eng" = span("Age interval for CVD risk",
-                                                 info_icon("CVD is affected by risk factors within this age interval")),
-                                    "swe" = span("Åldersintervall för hjärt-kärlrisk",
-                                                 info_icon("Hjärt-kärlsjukdom påverkas av riskfaktorer inom detta åldersintervall")),
-                     ), # end switch
-                     min = 0,
-                     max = 100,
-                     value = c(default_parameters$age_cutoff_cvd, 
-                               default_parameters$age_cutoff_cvd_high),
-                     step = 1)
-   ) # end bsCollapsePanel("advanced-options"
-),
+                            
+                            
+                            bsCollapse(id = "advanced-options",
+                                       bsCollapsePanel(switch(lang, 
+                                                              "eng" = "(+) Advanced options", 
+                                                              "swe"= "(+) Avancerade inställningar"),
+                                                       
+                                                       checkboxInput(inputId = "calibrate_cpaf_cancer",
+                                                                     label = switch(lang,
+                                                                                    "eng" = span(tags$b("Calibrate risk factor importance to cancer"),
+                                                                                                 info_icon("Enable to set the share of cancer accounted for by the risk factors in the model")),
+                                                                                    "swe" = span(tags$b("Kalibrera riskfaktorers betydelse för cancer"),
+                                                                                                 info_icon("Slå på för att bestämma andelen av cancer som tillskrivs modellens riskfaktorer")),
+                                                                     )),
+                                                       
+                                                       sliderInput(
+                                                         "cpaf_cancer",
+                                                         label = NULL,
+                                                         min = 0,
+                                                         max = 1.0,
+                                                         value = default_parameters$cpaf_cancer,
+                                                         step = 0.01),
+                                                       
+                                                       checkboxInput(inputId = "calibrate_cpaf_cvd",
+                                                                     label = switch(lang,
+                                                                                    "eng" = span(tags$b("Calibrate risk factor importance to cvd"),
+                                                                                                 info_icon("Enable to set the share of cvd accounted for by the risk factors in the model")),
+                                                                                    "swe" = span(tags$b("Kalibrera riskfaktorers betydelse för hjärt-kärlsjukdom"),
+                                                                                                 info_icon("Slå på för att bestämma andelen av hjärt-kärlsjukdom som tillskrivs modellens riskfaktorer")),
+                                                                     )),
+                                                       
+                                                       sliderInput(
+                                                         inputId = "cpaf_cvd",
+                                                         label = NULL,
+                                                         min = 0,
+                                                         max = 1.0,
+                                                         value = default_parameters$cpaf_cvd,
+                                                         step = 0.01),
+                                                       
+                                                       sliderInput(
+                                                         inputId = "age_cutoff_cancer",
+                                                         label = switch(lang,
+                                                                        "eng" = span("Age interval for cancer risk",
+                                                                                     info_icon("Cancer is affected by risk factors within this age interval")),
+                                                                        "swe" = span("Åldersintervall för cancerrisk",
+                                                                                     info_icon("Cancer påverkas av riskfaktorer inom detta åldersintervall")),
+                                                         ), # end switch
+                                                         min = 0,
+                                                         max = 100,
+                                                         value = c(default_parameters$age_cutoff_cancer, 
+                                                                   default_parameters$age_cutoff_cancer_high),
+                                                         step = 1),
+                                                       
+                                                       sliderInput(
+                                                         inputId = "age_cutoff_cvd",
+                                                         label = switch(lang,
+                                                                        "eng" = span("Age interval for CVD risk",
+                                                                                     info_icon("CVD is affected by risk factors within this age interval")),
+                                                                        "swe" = span("Åldersintervall för hjärt-kärlrisk",
+                                                                                     info_icon("Hjärt-kärlsjukdom påverkas av riskfaktorer inom detta åldersintervall")),
+                                                         ), # end switch
+                                                         min = 0,
+                                                         max = 100,
+                                                         value = c(default_parameters$age_cutoff_cvd, 
+                                                                   default_parameters$age_cutoff_cvd_high),
+                                                         step = 1)
+                                       ) # end bsCollapsePanel("advanced-options"
+                            ),
                             
                             ## Buttons for start/stop and pausing simulation
                             h5(switch(lang,
@@ -1640,22 +1879,32 @@ bsCollapse(id = "advanced-options",
                                                 "eng" = "Stop/clear", 
                                                 "swe"= "Stoppa/rensa")),
                             
+                            uiOutput("queue_status"),
+                            
+                            br(),
+                            
                             ## Text output showing simulation progress
-                          h5(switch(lang, 
-                                    "eng" = "Log", 
-                                    "swe"= "Logg")),
-                          
-                          tags$small(verbatimTextOutput("log_text_1")),
-                          
-                          disabled(downloadButton("button_save_baseline_data", 
-                                                  switch(lang, 
-                                                         "eng" = "Save data", 
-                                                         "swe"= "Spara data"))),
-                          
-                          downloadButton("button_save_baseline_parameters", 
-                                         switch(lang, 
-                                                "eng" = "Save parameters", 
-                                                "swe"= "Spara parametrar"))
+                            h5(switch(lang, 
+                                      "eng" = "Log", 
+                                      "swe"= "Logg")),
+                            
+                            uiOutput("progress_bar"),
+                            
+                            tags$div(
+                              id = "log_container_1",
+                              style = "height:120px; overflow-y:auto; background-color:#1e1e1e; color:#d4d4d4; padding:8px; font-family:monospace; font-size:12px;",
+                              uiOutput("log_text_1")
+                            ),
+                            
+                            disabled(downloadButton("button_save_baseline_data", 
+                                                    switch(lang, 
+                                                           "eng" = "Save data", 
+                                                           "swe"= "Spara data"))),
+                            
+                            downloadButton("button_save_baseline_parameters", 
+                                           switch(lang, 
+                                                  "eng" = "Save parameters", 
+                                                  "swe"= "Spara parametrar"))
                             
                    ),
                    
@@ -1782,10 +2031,17 @@ server <- function(input, output, session) {
   ## Unique session ID, used for session-specific files
   session_id <- session$token
   
+  # create temporary folder for session-files
+  dir.create(BASE_TMP, showWarnings = FALSE)
+  session_path <- get_session_path(session_id)
+  
+  last_log <- reactiveValues()
+  
+  queued_job_id <- reactiveVal(NULL)
+  queue_timer <- reactiveTimer(2000)
+  
   ## Create temporary directories for simulation for session
   session$onFlushed(function() {
-    
-    session_path <- file.path(tempdir(), session_id)
     
     for (scen in 1:n_scen_max) {
       
@@ -1811,8 +2067,6 @@ server <- function(input, output, session) {
   ## Remove temporary directories and files when session ends
   session$onSessionEnded(function() {
     
-    session_path <- file.path(tempdir(), session_id)
-    
     ## Stop ongoing simulations
     for (scen in 1:n_scen_max) {
       
@@ -1830,6 +2084,9 @@ server <- function(input, output, session) {
     if (dir.exists(session_path)) {
       unlink(session_path, recursive = TRUE, force = TRUE)
     }
+    
+    ## Frigör lås för alla scenarier i denna session
+    for (scen in 1:n_scen_max) clear_running(scen)
     
   })
   
@@ -1858,9 +2115,10 @@ server <- function(input, output, session) {
   
   timer_log <- reactiveTimer(500)
   timer_data <- reactiveTimer(5000)
+  timer_progress <- reactiveTimer(1000)
   
   ## Controls for calibration of risk factor explainability wrt cancer and cvd
-
+  
   session$onFlushed(function() {
     if (isolate(input$calibrate_cpaf_cancer) == FALSE) {
       disable("cpaf_cancer")
@@ -1882,7 +2140,7 @@ server <- function(input, output, session) {
       }
     }
   })
-    
+  
   observeEvent(input$calibrate_cpaf_cvd, {
     if (input$calibrate_cpaf_cvd == FALSE) {
       disable("cpaf_cvd")
@@ -1892,7 +2150,107 @@ server <- function(input, output, session) {
       }
     }
   })
+  
+  output$queue_status <- renderUI({
     
+    # is_running() läser en fil på disk och är inte reaktiv i sig. Genom att
+    # läsa sim_status() och en snabb timer här invalideras texten regelbundet,
+    # även när låset släpps (jobbet klart), så att meddelandet inte fastnar.
+    sim_status()
+    timer_progress()                       # tickar varje sekund
+    
+    job_id <- queued_job_id()
+    
+    if (!is.null(job_id)) {
+      pos <- queue_position(job_id)
+      
+      if (!is.na(pos) && pos > 1) {
+        return(
+          tags$div(
+            style = "color:#ff6b6b; font-weight:bold; margin-top:8px;",
+            switch(lang,
+                   "eng" = paste("Queued. Position:", pos),
+                   "swe" = paste("Köad. Plats:", pos)
+            )
+          )
+        )
+      } else if (!is.na(pos) && pos == 1) {
+        return(
+          tags$div(
+            style = "color:#339af0; font-weight:bold; margin-top:8px;",
+            switch(lang,
+                   "eng" = "First in queue – waiting for server to become free.",
+                   "swe" = "Först i kön – väntar på att servern ska bli ledig."
+            )
+          )
+        )
+      }
+    }
+    
+    n_active <- n_running()
+    if (n_active > 0) {
+      return(
+        tags$div(
+          style = "color:#ff6b6b; font-weight:bold; margin-top:8px;",
+          switch(lang,
+                 "eng" = if (n_active == 1) "A simulation is currently running on the server."
+                 else paste(n_active, "simulations are currently running on the server."),
+                 "swe" = if (n_active == 1) "En simulering körs just nu på servern."
+                 else paste(n_active, "simuleringar körs just nu på servern.")
+          )
+        )
+      )
+    }
+    
+    NULL
+  })
+  
+  output$progress_bar <- renderUI({
+    
+    timer_progress()  
+    
+    if (sim_status()[[1]] != "run") return(NULL)
+    
+    progress <- get_progress(1, session_id, input$slider_simyears[1], input$slider_simyears[2])
+    
+    
+    tags$div(
+      style = "width:100%; background:#ddd; height:20px; border-radius:4px;",
+      
+      tags$div(
+        style = paste0(
+          "width:", round(progress*100), "%;
+       background:#009F80;
+       height:100%;
+       border-radius:4px;
+       text-align:center;
+       color:white;
+       font-size:12px;
+       line-height:20px;"
+        ),
+        
+        paste0(round(progress*100), "%")         )
+    )
+  })
+  
+  output$button_save_ts_data <- renderUI({
+    
+    # bara synlig när baseline finns OCH simuleringen inte körs
+    if (!is.null(dat_base[["scen_1"]]) &&
+        all(sim_status() != "run")) {
+      
+      downloadButton(
+        "button_save_ts_data_download",
+        switch(lang,
+               "eng" = "Save plot data",
+               "swe" = "Spara diagramdata")
+      )
+      
+    } else {
+      NULL
+    }
+    
+  })
   
   ## Observer for when custom age interval is manipulated for time series plots,
   ## switching group to custom age. NOTE: does not work currently as it triggers
@@ -1903,44 +2261,110 @@ server <- function(input, output, session) {
   # })
   
   ## Observer for reading logs for active simulations
-  observeEvent(timer_log(), {
+  observe({
+    timer_log()  # reaktivt beroende
+    
     lapply(1:n_scen_max, function(scen) {
+      
       outputId <- paste0("log_text_", scen)
+      log_key <- paste0("scen_", scen)
       
       if (sim_status()[[scen]] == "run") {
         log_text <- scan_log(scen, session_id = session_id)
-        output[[outputId]] <- renderText(log_text)
+        
+        output[[outputId]] <- renderUI({
+          
+          if (is.null(log_text)) return(NULL)
+          
+          lines <- strsplit(log_text, "\n")[[1]]
+          
+          colored <- lapply(lines, function(line) {
+            
+            col <- "#d4d4d4"
+            
+            if (grepl("Error|Stopped", line, ignore.case = TRUE)) {
+              col <- "#ff6b6b"
+            } else if (grepl("completed|klar", line, ignore.case = TRUE)) {
+              col <- "#51cf66"
+            } else if (grepl("Year|År", line)) {
+              col <- "#339af0"
+            }
+            
+            tags$div(style = paste0("color:", col, ";"), line)
+          })
+          
+          tags$div(colored)
+        })
+        
+        # ✅ endast cache
+        last_log[[paste0("scen_", scen)]] <- log_text
+        
       } else if (sim_status()[[scen]] == "stop") {
         log_text <- switch(lang,
                            "eng" = "Waiting to start or load", 
                            "swe" = "Väntar på att starta eller ladda")
-        output[[outputId]] <- renderText(log_text)
+        
+        output[[outputId]] <- renderUI({
+          tags$div(style = "color:#d4d4d4;", log_text)
+        })
+        
       } else if (sim_status()[[scen]] == "active") {
         log_text <- switch(lang,
                            "eng" = "Scenario active",
                            "swe" = "Scenario aktivt"
         )
-        output[[outputId]] <- renderText(log_text)
+        
+        output[[outputId]] <- renderUI({
+          tags$div(style = "color:#d4d4d4;", log_text)
+        })
+        
       }
+      
+      session$sendCustomMessage(
+        "scroll-log",
+        paste0("log_container_", scen)
+      )
+      
     }) # end lapply
     NULL
   })
   
+  lapply(2:n_scen_max, function(scen) {
+    
+    output[[paste0("button_save_scen_", scen, "_download")]] <- downloadHandler(
+      filename = function() {
+        paste0(input[[paste0("scen_", scen, "_name")]], ".csv")
+      },
+      content = function(file) {
+        fwrite(
+          dat_base[[paste0("scen_", scen)]][, ..all_var_names],
+          file,
+          row.names = FALSE,
+          sep = ";",
+          encoding = "UTF-8"
+        )
+      }
+    )
+    
+  })
+  
   ## Observer for reading data for active simulations
   ## sim_status() is also set to "stop" when run completed
-  observeEvent(timer_data(), {
+  observe({
+    timer_data()
     lapply(1:n_scen_max, function(scen) {
       if (sim_status()[[scen]] == "run") {
         
-      data_path <- paste0("UI/", session_id, "/runs/scen_", scen, "/data/")
-      ## Extract path to the .rda file. Normally there is only one file, but if
-      ## the simulation script fails to remove the previous one, this will be a
-      ## vector and so we should account for that
-      data_file <- dir(data_path)
+        data_path <- file.path(get_session_path(session_id), "runs", paste0("scen_", scen), "data", "")
+        
+        ## Extract path to the .rda file. Normally there is only one file, but if
+        ## the simulation script fails to remove the previous one, this will be a
+        ## vector and so we should account for that
+        data_file <- dir(data_path)
         if (length(data_file) == 1) {
           ## Load data and assign to reactive data list
           
-          tmp <- tryCatch(load(file = paste0(data_path, data_file)), 
+          tmp <- tryCatch(load(file.path(data_path, data_file)), 
                           error = function(e) {
                             cat("Problem reading simulation data. If the simulations stops entirely, stop/clear the simulation and restart. Error message: ", 
                                 e$message) }
@@ -1959,26 +2383,27 @@ server <- function(input, output, session) {
             }
             
             ## Create scenario id variable
-        dat[, scen_id := paste0("scen_", scen)]
-        
-        dat_base[[paste0("scen_", scen)]] <- dat
-        ## Check if loaded data was the last year and if so update sim_status()
-        if(dat[.N, s_pop!=0]) {
-          sim_status(replace(sim_status(), scen, "active"))
-          ## Activate baseline if a baseline run was completed
-          if (scen == 1) baseline_active("yes")
-        } # if(dat[.N, s_pop!=0])
-      } # if (!is.null(tmp))
-    } else if (length(data_file) > 1) {
-      file.remove(paste0(data_path, dir(data_path)))
-    }
+            dat[, scen_id := paste0("scen_", scen)]
+            
+            dat_base[[paste0("scen_", scen)]] <- dat
+            ## Check if loaded data was the last year and if so update sim_status()
+            if(dat[.N, s_pop!=0]) {
+              sim_status(replace(sim_status(), scen, "active"))
+              clear_running(scen)
+              ## Activate baseline if a baseline run was completed
+              if (scen == 1) baseline_active("yes")
+            } # if(dat[.N, s_pop!=0])
+          } # if (!is.null(tmp))
+        } else if (length(data_file) > 1) {
+          file.remove(file.path(data_path, dir(data_path)))
+        }
       } # if (sim_status()[[scen]] == "run")
     }) # end lapply()
     NULL
   })
   
- ## Observer for when baseline becomes active/inactive/starts running, to update
- ## the controls accordingly
+  ## Observer for when baseline becomes active/inactive/starts running, to update
+  ## the controls accordingly
   observeEvent(baseline_active(), {
     
     if (baseline_active() == "yes") {
@@ -2004,16 +2429,27 @@ server <- function(input, output, session) {
   
   ## Observer for when status of scenarios change, updating controls accordingly
   observeEvent(sim_status(), {
+    
+    
+    # Frigör lås för varje scenario som inte längre har status "run".
+    status_now <- sim_status()
+    for (scen in seq_along(status_now)) {
+      if (!identical(status_now[[scen]], "run")) clear_running(scen)
+    }
+    
     for (scen in 2:n_scen_max) {
       if (sim_status()[scen] == "active") {
         enable(paste0("button_save_scen_", scen))
         disable(paste0("button_run_scen_", scen))
+        
       } else if (sim_status()[scen] == "stop") {
         disable(paste0("button_save_scen_", scen))
         enable(paste0("button_run_scen_", scen))
+        
       } else if (sim_status()[scen] == "run") {
         disable(paste0("button_save_scen_", scen))
         disable(paste0("button_run_scen_", scen))
+        
       }
     } # end for
   })
@@ -2027,24 +2463,24 @@ server <- function(input, output, session) {
       fread(input$button_load_baseline_data$datapath, sep = ";", header=TRUE),
       error = function(e) {
         showNotification(paste0(switch(lang,
-                       "eng" = "Problem reading data, error message: ",
-                       "swe" = "Problem med att läsa in data, felmeddelande: "
+                                       "eng" = "Problem reading data, error message: ",
+                                       "swe" = "Problem med att läsa in data, felmeddelande: "
         ),
         e$message)) }
     ) # end tryCatch
     
     ## Validate baseline data
     showNotification(switch(lang,
-                "eng" = "Validating data...",
-                "swe" = "Validerar data...")
+                            "eng" = "Validating data...",
+                            "swe" = "Validerar data...")
     )
     
     if (is.null(baseline_data_tmp_catch)) return(NULL)
-
+    
     if (all(colnames(baseline_data_tmp_catch) == all_var_names) == FALSE) {
       showNotification(switch(lang,
-            "eng" = "Erroneous names or order of variables in data ",
-            "swe" = "Felaktiga namn eller fel ordning på variabler i data")
+                              "eng" = "Erroneous names or order of variables in data ",
+                              "swe" = "Felaktiga namn eller fel ordning på variabler i data")
       )
       return(NULL)
     }
@@ -2060,7 +2496,7 @@ server <- function(input, output, session) {
     ## Extract name and store in reactive value
     baseline_name_tmp(unlist(
       strsplit(input$button_load_baseline_data$name, ".csv", fixed=TRUE)))
-   })
+  })
   
   ## Observer for loading baseline parameters
   
@@ -2152,44 +2588,48 @@ server <- function(input, output, session) {
   observeEvent(input$button_apply_loaded_baseline, {
     
     showNotification(switch(lang,
-        "eng" = "Loading baseline...",
-        "swe" = "Laddar baslinje")
-      )
+                            "eng" = "Loading baseline...",
+                            "swe" = "Laddar baslinje")
+    )
     
-      dat <- baseline_data_tmp()
+    dat <- baseline_data_tmp()
     
-      ## Save baseline in the temporary directory name
-      baseline_path_session <- paste0(PROJECTROOT, "/UI/", session_id,
-                                      "/scenarios/", baseline_name_tmp(), "/")
-      dir.create(baseline_path_session, showWarnings = FALSE)
-      fwrite(dat, file=paste0(baseline_path_session, baseline_name_tmp(), ".csv"),
-             sep=";")
-      write_json(baseline_parameters_tmp(),
-        path=paste0(baseline_path_session, baseline_name_tmp(), ".json"))
+    ## Save baseline in the temporary session directory
+    baseline_path_session <- file.path(
+      get_session_path(session_id),
+      "scenarios",
+      baseline_name_tmp()
+    )
     
-      ## Update baseline_parameters reactive value
-      baseline_parameters(baseline_parameters_tmp())
-
-      ## Update baseline name
-      updateTextInput(inputId = "scen_1_name", value = baseline_name_tmp())
-
-      ## Create scenario id variable
-      dat[, scen_id := "scen_1"]
-
-      ## Update reactive value data
-      dat_base[["scen_1"]] <- dat
-
-      ## Update simulation year slider
-      updateSliderInput(inputId = "slider_simyears",
-                        value = c(dat[, min(year)], dat[, max(year)]))
-
-      ## Update baseline active status
-      baseline_active("yes")
-      
-      ## Clear temporary baseline reactives
-      baseline_name_tmp(NULL)
-      baseline_data_tmp(NULL)
-      baseline_parameters_tmp(NULL)
+    dir.create(baseline_path_session, recursive = TRUE, showWarnings = FALSE)
+    
+    fwrite(dat,file = file.path(baseline_path_session, paste0(baseline_name_tmp(), ".csv")),sep = ";")
+    
+    write_json(baseline_parameters_tmp(),path = file.path(baseline_path_session, paste0(baseline_name_tmp(), ".json")))
+    
+    ## Update baseline_parameters reactive value
+    baseline_parameters(baseline_parameters_tmp())
+    
+    ## Update baseline name
+    updateTextInput(inputId = "scen_1_name", value = baseline_name_tmp())
+    
+    ## Create scenario id variable
+    dat[, scen_id := "scen_1"]
+    
+    ## Update reactive value data
+    dat_base[["scen_1"]] <- dat
+    
+    ## Update simulation year slider
+    updateSliderInput(inputId = "slider_simyears",
+                      value = c(dat[, min(year)], dat[, max(year)]))
+    
+    ## Update baseline active status
+    baseline_active("yes")
+    
+    ## Clear temporary baseline reactives
+    baseline_name_tmp(NULL)
+    baseline_data_tmp(NULL)
+    baseline_parameters_tmp(NULL)
   })
   
   ## Read uploaded baseline parameters and update sliders
@@ -2293,16 +2733,26 @@ server <- function(input, output, session) {
   )
   
   lapply(2:n_scen_max, function(scen) {
-    output[[paste0("button_save_scen_", scen)]] <- downloadHandler(
-      filename = function() {
-        paste0(input[[paste0("scen_", scen, "_name")]], ".csv")
-      },
-      content = function(file) {
-        fwrite(dat_base[[paste0("scen_", scen)]][, ..all_var_names], file, 
-               row.names = FALSE, sep = ";", encoding = "UTF-8")
+    
+    output[[paste0("button_save_scen_", scen)]] <- renderUI({
+      
+      if (sim_status()[[scen]] == "active") {
+        
+        downloadButton(
+          outputId = paste0("button_save_scen_", scen, "_download"),
+          label = switch(lang,
+                         "eng" = "Save data",
+                         "swe" = "Spara data")
+        )
+        
+      } else {
+        NULL
       }
-    )
+      
+    })
+    
   })
+  
   
   ################################################################################
   ## Dynamic UI elements
@@ -2318,13 +2768,15 @@ server <- function(input, output, session) {
       )
     } else if (baseline_active() == "yes") {
       switch(lang,
- "eng" = h5("Baseline ",
-            ok_icon("The checkmark indicates that a baseline is active")),
- "swe" = h5("Baslinje ",
-            ok_icon("Bocken indikerar aktiv baslinje"))
+             "eng" = h5("Baseline ",
+                        ok_icon("The checkmark indicates that a baseline is active")),
+             "swe" = h5("Baslinje ",
+                        ok_icon("Bocken indikerar aktiv baslinje"))
       )
     }
   })
+  
+  
   
   ## Create all scenario controls. To change number of scenarios, set n_scen_max
   ## at top of this script
@@ -2335,150 +2787,156 @@ server <- function(input, output, session) {
     for (scen in 2:n_scen_max) {
       ui_scen_list[[scen]] <-  
         bsCollapse(id = paste0("panel_scen_", scen),
-bsCollapsePanel(paste0("(+) Scenario ", scen),
-               
-               h5(switch(lang, 
-                         "eng" = "Load scenario data",
-                         "swe" = "Ladda scenariodata"),
-                  info_icon(switch(lang,
-                       "eng" = "Load pre-simulated scenario data from csv-file",
-                       "swe" = "Ladda försimulerade scenariodata från csv-fil")
-                  )
-               ),
-               if (baseline_active() == "yes") {
-                 fileInput(paste0("button_load_scen_", scen), label=NULL, 
-                           accept=".csv", placeholder = switch(lang,
-                                                   "eng" = "Choose a csv-file",
-                                                   "swe" = "Välj en csv-fil")
-                 )
-               } else {
-                 disabled(fileInput(paste0("button_load_scen_", scen), label=NULL, 
-                                    accept=".csv", placeholder = switch(lang,
-                                                    "eng" = "Baseline needed",
-                                                    "swe" = "Baslinje behövs")
-                 ))
-               },
-               
-               h5(switch(lang, 
-                         "eng" = "Scenario name",
-                         "swe" = "Scenarionamn"),
-                  info_icon(switch(lang,
-                               "eng" = "Choose a custom name for the scenario",
-                               "swe" = "Välj ett anpassat scenarionamn")
-                  )
-               ),
-               textInput(paste0("scen_", scen, "_name"), label = NULL,
-                         value = paste0("scen_", scen)),
-               
-               h5(switch(lang, 
-                         "eng" = "Risk group size", 
-                         "swe"= "Storlek på riskgrupp"), 
-                  info_icon(risk_factor_info_text)
-               ),
-               
-               bsCollapse(id = "risk-factors",
-                          bsCollapsePanel(switch(lang, 
-                                                 "eng" = "(+) Non-dietary", 
-                                                 "swe"= "(+) Icke-kost"),
-                                          
-                                          risk_factor_slider(
-                                            paste0("cfact_smoking_", scen),
-                                            label = label_slider_smoking,
-                                            info_text = info_text_smoking
-                                          ),
-                                          risk_factor_slider(
-                                            paste0("cfact_alcohol_", scen),
-                                            label = label_slider_alcohol,
-                                            info_text = info_text_alcohol
-                                          ),
-                                          risk_factor_slider(
-                                            paste0("cfact_inactivity_", scen),
-                                            label = label_slider_inactivity, 
-                                            info_text = info_text_inactivity 
-                                          ),
-                                          risk_factor_slider(
-                                            paste0("cfact_bmi_", scen),
-                                            label = label_slider_bmi,
-                                            info_text = info_text_bmi
-                                          )
-                          ), # end bsCollapsePanel("Non-dietary"
-                          bsCollapsePanel(switch(lang, 
-                                                 "eng" = "(+) Dietary", 
-                                                 "swe"= "(+) Kost"),
-                                          
-                                          risk_factor_slider(
-                                            paste0("cfact_fruit_", scen),
-                                            label = label_slider_fruit,
-                                            info_text = info_text_fruit
-                                          ),
-                                          risk_factor_slider(
-                                            paste0("cfact_wholegrains_", scen),
-                                            label = label_slider_wholegrains,
-                                            info_text = info_text_wholegrains
-                                          ),
-                                          risk_factor_slider(
-                                            paste0("cfact_greens_", scen),
-                                            label = label_slider_greens,
-                                            info_text = info_text_greens
-                                          ),
-                                          risk_factor_slider(
-                                            paste0("cfact_meat_", scen),
-                                            label = label_slider_meat,
-                                            info_text = info_text_meat
-                                          ),
-                                          risk_factor_slider(
-                                            paste0("cfact_salt_", scen),
-                                            label = label_slider_salt,
-                                            info_text = info_text_salt
-                                          )
-                          ) # end bsCollapsePanel("Dietary"
-               ), # end bsCollapse(id = "risk-factors"
-               
-               h5(switch(lang, 
-                         "eng" = "Phase-in period", 
-                         "swe"= "Infasningsperiod"),
-                  info_icon(switch(lang, 
-                                   "eng" = "Changes in the size of the risk groups are phased in linearly during this period and remain thereafter", 
-                                   "swe"= "Förändringar i storleken på riskgrupperna fasas in linjärt under denna period och kvarstår därefter"))
-               ),
-                     
-                     sliderInput(
-                       paste0("slider_intervention_years_", scen),
-                       label = NULL,
-                       min = start_year_min,
-                       max = end_year_max,
-                       value = c(2025, 2026),
-                       step = 1,
-                       sep = "",
-                       width = slider_width),
-                     
-                     h5(switch(lang,
-                               "eng" = "Simulation controls",
-                               "swe" = "Simuleringskontroller")
-                     ),
-                     
-                     actionButton(paste0("button_run_scen_", scen), 
-                                  switch(lang, 
-                                         "eng" = "Run", 
-                                         "swe"= "Starta")),
-                     
-                     actionButton(paste0("button_clear_scen_", scen), 
-                                  switch(lang, 
-                                         "eng" = "Stop/clear", 
-                                         "swe"= "Stoppa/rensa")),
-                     
-                     ## Text output showing simulation progress
-                     h5(switch(lang, 
-                               "eng" = "Log", 
-                               "swe"= "Logg")
-                     ),
-                     
-                     tags$small(verbatimTextOutput(paste0("log_text_", scen))),
-                     disabled(downloadButton(paste0("button_save_scen_", scen),
-                                             switch(lang, 
-                                                    "eng" = "Save data", 
-                                                    "swe"= "Spara data")))
-     )  # end bsCollapse
+                   bsCollapsePanel(paste0("(+) Scenario ", scen),
+                                   
+                                   h5(switch(lang, 
+                                             "eng" = "Load scenario data",
+                                             "swe" = "Ladda scenariodata"),
+                                      info_icon(switch(lang,
+                                                       "eng" = "Load pre-simulated scenario data from csv-file",
+                                                       "swe" = "Ladda försimulerade scenariodata från csv-fil")
+                                      )
+                                   ),
+                                   if (baseline_active() == "yes") {
+                                     fileInput(paste0("button_load_scen_", scen), label=NULL, 
+                                               accept=".csv", placeholder = switch(lang,
+                                                                                   "eng" = "Choose a csv-file",
+                                                                                   "swe" = "Välj en csv-fil")
+                                     )
+                                   } else {
+                                     disabled(fileInput(paste0("button_load_scen_", scen), label=NULL, 
+                                                        accept=".csv", placeholder = switch(lang,
+                                                                                            "eng" = "Baseline needed",
+                                                                                            "swe" = "Baslinje behövs")
+                                     ))
+                                   },
+                                   
+                                   h5(switch(lang, 
+                                             "eng" = "Scenario name",
+                                             "swe" = "Scenarionamn"),
+                                      info_icon(switch(lang,
+                                                       "eng" = "Choose a custom name for the scenario",
+                                                       "swe" = "Välj ett anpassat scenarionamn")
+                                      )
+                                   ),
+                                   textInput(paste0("scen_", scen, "_name"), label = NULL,
+                                             value = paste0("scen_", scen)),
+                                   
+                                   h5(switch(lang, 
+                                             "eng" = "Risk group size", 
+                                             "swe"= "Storlek på riskgrupp"), 
+                                      info_icon(risk_factor_info_text)
+                                   ),
+                                   
+                                   bsCollapse(id = "risk-factors",
+                                              bsCollapsePanel(switch(lang, 
+                                                                     "eng" = "(+) Non-dietary", 
+                                                                     "swe"= "(+) Icke-kost"),
+                                                              
+                                                              risk_factor_slider(
+                                                                paste0("cfact_smoking_", scen),
+                                                                label = label_slider_smoking,
+                                                                info_text = info_text_smoking
+                                                              ),
+                                                              risk_factor_slider(
+                                                                paste0("cfact_alcohol_", scen),
+                                                                label = label_slider_alcohol,
+                                                                info_text = info_text_alcohol
+                                                              ),
+                                                              risk_factor_slider(
+                                                                paste0("cfact_inactivity_", scen),
+                                                                label = label_slider_inactivity, 
+                                                                info_text = info_text_inactivity 
+                                                              ),
+                                                              risk_factor_slider(
+                                                                paste0("cfact_bmi_", scen),
+                                                                label = label_slider_bmi,
+                                                                info_text = info_text_bmi
+                                                              )
+                                              ), # end bsCollapsePanel("Non-dietary"
+                                              bsCollapsePanel(switch(lang, 
+                                                                     "eng" = "(+) Dietary", 
+                                                                     "swe"= "(+) Kost"),
+                                                              
+                                                              risk_factor_slider(
+                                                                paste0("cfact_fruit_", scen),
+                                                                label = label_slider_fruit,
+                                                                info_text = info_text_fruit
+                                                              ),
+                                                              risk_factor_slider(
+                                                                paste0("cfact_wholegrains_", scen),
+                                                                label = label_slider_wholegrains,
+                                                                info_text = info_text_wholegrains
+                                                              ),
+                                                              risk_factor_slider(
+                                                                paste0("cfact_greens_", scen),
+                                                                label = label_slider_greens,
+                                                                info_text = info_text_greens
+                                                              ),
+                                                              risk_factor_slider(
+                                                                paste0("cfact_meat_", scen),
+                                                                label = label_slider_meat,
+                                                                info_text = info_text_meat
+                                                              ),
+                                                              risk_factor_slider(
+                                                                paste0("cfact_salt_", scen),
+                                                                label = label_slider_salt,
+                                                                info_text = info_text_salt
+                                                              )
+                                              ) # end bsCollapsePanel("Dietary"
+                                   ), # end bsCollapse(id = "risk-factors"
+                                   
+                                   h5(switch(lang, 
+                                             "eng" = "Phase-in period", 
+                                             "swe"= "Infasningsperiod"),
+                                      info_icon(switch(lang, 
+                                                       "eng" = "Changes in the size of the risk groups are phased in linearly during this period and remain thereafter", 
+                                                       "swe"= "Förändringar i storleken på riskgrupperna fasas in linjärt under denna period och kvarstår därefter"))
+                                   ),
+                                   
+                                   sliderInput(
+                                     paste0("slider_intervention_years_", scen),
+                                     label = NULL,
+                                     min = start_year_min,
+                                     max = end_year_max,
+                                     value = c(2025, 2026),
+                                     step = 1,
+                                     sep = "",
+                                     width = slider_width),
+                                   
+                                   h5(switch(lang,
+                                             "eng" = "Simulation controls",
+                                             "swe" = "Simuleringskontroller")
+                                   ),
+                                   
+                                   actionButton(paste0("button_run_scen_", scen), 
+                                                switch(lang, 
+                                                       "eng" = "Run", 
+                                                       "swe"= "Starta")),
+                                   
+                                   actionButton(paste0("button_clear_scen_", scen), 
+                                                switch(lang, 
+                                                       "eng" = "Stop/clear", 
+                                                       "swe"= "Stoppa/rensa")),
+                                   
+                                   ## Text output showing simulation progress
+                                   h5(switch(lang, 
+                                             "eng" = "Log", 
+                                             "swe"= "Logg")
+                                   ),
+                                   
+                                   
+                                   tags$div(
+                                     id = paste0("log_container_", scen),
+                                     style = "height: 200px; overflow-y: auto;
+                 background-color: #1e1e1e;
+                 color: #d4d4d4;
+                 padding: 8px;
+                 font-family: monospace;
+                 font-size: 12px;",
+                                     uiOutput(paste0("log_text_", scen))),
+                                   uiOutput(paste0("button_save_scen_", scen))
+                   )  # end bsCollapse
         ) # end bsCollapsePanel
     }
     
@@ -2488,6 +2946,9 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
   
   ## Slider for changing custom age interval of time series graph
   output$slider_age_custom_ts_plot <- renderUI({
+    
+    if (sim_status()[[1]] == "run") return(NULL)
+    
     dat_base_1 <- dat_base[["scen_1"]]
     if (is.null(dat_base_1)) return(NULL)
     tagList(
@@ -2578,9 +3039,7 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
   
   output$render_button_save_ts_data <- renderUI({
     if (is.null(dat_base[["scen_1"]])) return(NULL)
-    downloadButton("button_save_ts_data", switch(lang, 
-                                                 "eng" = "Save plot data",
-                                                 "swe" = "Spara diagramdata"))
+    uiOutput("button_save_ts_data")
   })
   
   output$render_button_save_cs_data <- renderUI({
@@ -2597,17 +3056,65 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
                                                   "swe" = "Spara diagramdata"))
   })
   
+  
+  
   ##############################################################################
   ## Simulation controls
   ##############################################################################
   
   ## Observers for running, clearing and loading scenarios
   
+  
   lapply(1:n_scen_max, function(scen) {
     observeEvent(input[[paste0("button_run_scen_", scen)]], {
-      run_scen(scen, input = input, sim_status = sim_status, 
-               baseline_active = baseline_active,
-               session_id = session_id)
+      
+      # Om användaren redan står i kö eller kör, gör inget nytt jobb
+      if (!is.null(queued_job_id()) || sim_status()[[scen]] == "run") {
+        showNotification(
+          switch(lang,
+                 "eng" = "A job is already queued or running for this session.",
+                 "swe" = "Ett jobb är redan köat eller körs för denna session."
+          ),
+          type = "message",
+          duration = 5
+        )
+        return(NULL)
+      }
+      
+      # Spara alla input-värden vid knapptrycket
+      params <- list(
+        scen = scen,
+        simyears = input$slider_simyears,
+        intervention_years = input[[paste0("slider_intervention_years_", scen)]],
+        cfact_smoking = input[[paste0("cfact_smoking_", scen)]],
+        cfact_alcohol = input[[paste0("cfact_alcohol_", scen)]],
+        cfact_inactivity = input[[paste0("cfact_inactivity_", scen)]],
+        cfact_bmi = input[[paste0("cfact_bmi_", scen)]],
+        cfact_fruit = input[[paste0("cfact_fruit_", scen)]],
+        cfact_wholegrains = input[[paste0("cfact_wholegrains_", scen)]],
+        cfact_greens = input[[paste0("cfact_greens_", scen)]],
+        cfact_meat = input[[paste0("cfact_meat_", scen)]],
+        cfact_salt = input[[paste0("cfact_salt_", scen)]],
+        scen_1_name = input$scen_1_name,
+        calibrate_cpaf_cancer = input$calibrate_cpaf_cancer,
+        calibrate_cpaf_cvd = input$calibrate_cpaf_cvd,
+        cpaf_cancer = input$cpaf_cancer,
+        cpaf_cvd = input$cpaf_cvd,
+        age_cutoff_cancer = input$age_cutoff_cancer,
+        age_cutoff_cvd = input$age_cutoff_cvd
+      )
+      
+      job_id <- enqueue_job(session_id, scen, params)
+      queued_job_id(job_id)
+      
+      showNotification(
+        switch(lang,
+               "eng" = "Job added to queue.",
+               "swe" = "Jobbet har lagts i kö."
+        ),
+        type = "message",
+        duration = 5
+      )
     })
   })
   
@@ -2621,7 +3128,7 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
   
   lapply(2:n_scen_max, function(scen) {
     observeEvent(input[[paste0("button_load_scen_", scen)]], {
-    load_scen(scen, input = input, sim_status = sim_status, dat_base = dat_base)
+      load_scen(scen, input = input, sim_status = sim_status, dat_base = dat_base)
     })
   })
   
@@ -2636,11 +3143,86 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
   #   } # end for
   # })
   
+  
+  observeEvent(queue_timer(), {
+    
+    job_id <- queued_job_id()
+    if (is.null(job_id)) return(NULL)
+    
+    h <- head_job()
+    if (is.null(h)) return(NULL)
+    
+    if (!identical(h$job_id, job_id)) return(NULL)
+    
+    scen_to_run <- as.integer(h$scen)
+    
+    # Starta inte om detta scenario redan kör, eller om serverns kapacitet
+    # (antal samtidiga jobb = antal workers) är fylld.
+    if (is_running(scen_to_run)) return(NULL)
+    if (n_running() >= max_jobs) return(NULL)
+    
+    # Starta INTE jobbet om ingen worker är ledig. Annars blir future({...})
+    # blockerande och fryser hela Shiny-huvudsessionen tills jobbet är klart.
+    free_workers <- tryCatch(future::nbrOfFreeWorkers(), error = function(e) NA)
+    if (is.na(free_workers) || free_workers < 1) return(NULL)
+    
+    params_file <- file.path(QUEUE_DIR, paste0(job_id, ".rds"))
+    if (!file.exists(params_file)) {
+      queued_job_id(NULL)
+      dequeue_job(job_id)
+      return(NULL)
+    }
+    params <- readRDS(params_file)
+    
+    # Markera scenariot som upptaget och "run" INNAN run_scen,
+    # men spara förra statusen så vi kan rulla tillbaka om run_scen avbryter.
+    prev_status <- sim_status()
+    set_running(scen_to_run, job_id)
+    sim_status(replace(sim_status(), scen_to_run, "run"))
+    
+    started <- run_scen(
+      scen = scen_to_run,
+      params = params,
+      sim_status = sim_status,
+      baseline_active = baseline_active,
+      session_id = session_id
+    )
+    
+    # Plocka bort jobbet ur kön och städa params-filen oavsett utfall,
+    # så att ett ogiltigt jobb inte ligger kvar och blockerar kön.
+    dequeue_job(job_id)
+    if (file.exists(params_file)) file.remove(params_file)
+    queued_job_id(NULL)
+    
+    if (is.null(started)) {
+      # run_scen avbröt (t.ex. ingen aktiv baslinje, ogiltiga årtal).
+      # Frigör scenariots lås och återställ status så att nästa jobb kan starta.
+      clear_running(scen_to_run)
+      sim_status(prev_status)
+      return(NULL)
+    }
+    
+    # Futuret kör nu fire-and-forget i bakgrunden. Datainläsaren (timer_data)
+    # upptäcker .rda-filerna och sätter status till "active" + clear_running()
+    # när sista årets data lästs in. Inget future-objekt behöver behållas.
+    
+  })
+  
+  ## NOTERA: Det finns medvetet INGET poll-block här som anropar
+  ## future::resolved()/value(). Att inspektera ett ClusterFuture reaktivt kunde
+  ## frysa Shiny-eventloopen. I stället körs futuret fire-and-forget och
+  ## datainläsningsobservern (timer_data) sköter allt: den läser .rda-filerna
+  ## från disk (blockerar aldrig) och sätter sim_status = "active",
+  ## clear_running() samt baseline_active("yes") när sista årets data lästs in.
+  ## Detta är samma robusta mönster som den ursprungliga, fungerande versionen.
+  
   ##############################################################################
   ## Plots
   ##############################################################################
   
   output$plot_time_series <- renderPlotly({
+    
+    req(sim_status()[[1]] != "run")            # börja rita diagram när all data är beräknad
     
     ## Extract reactive data object as a normal list
     dat_list <- reactiveValuesToList(dat_base)
@@ -2648,16 +3230,22 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
     ## Plot only if there is some baseline data
     if (is.null(dat_list[["scen_1"]])) return(NULL)
     
-    create_plot(dat_list = dat_list,
-                plot_type = "ts",
-                var_to_plot = input$ts_var_to_plot,
-                group = input$ts_group, 
-                measure = input$ts_measure,
-                years = input$slider_simyears,
-                age_limits_custom = input$slider_age_custom_ts_plot,
-                var_list = var_list,
-                var_labels = var_labels,
-                input = input)
+    tryCatch(
+      create_plot(dat_list = dat_list,
+                  plot_type = "ts",
+                  var_to_plot = input$ts_var_to_plot,
+                  group = input$ts_group, 
+                  measure = input$ts_measure,
+                  years = input$slider_simyears,
+                  age_limits_custom = input$slider_age_custom_ts_plot,
+                  var_list = var_list,
+                  var_labels = var_labels,
+                  input = input),
+      error = function(e) {
+        cat("Fel vid skapande av tidsseriediagram:", conditionMessage(e), "\n")
+        NULL
+      }
+    )
   })
   
   output$plot_cross_section <- renderPlotly({
@@ -2701,9 +3289,10 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
                 input = input)
   })
   
+  
   ## Handlers for downloading plot data
   
-  output$button_save_ts_data <- downloadHandler(
+  output$button_save_ts_data_download <- downloadHandler(
     filename = function() {
       paste0("plot_data.csv")
     },
@@ -2760,12 +3349,18 @@ bsCollapsePanel(paste0("(+) Scenario ", scen),
     }
   )
   
-  
-  session$onSessionEnded(function() {
-    session_path <- file.path(tempdir(), session_id)
-    unlink(session_path, recursive = TRUE, force = TRUE)
-  })
-  
+  ## Outputs i inaktiva tabsetPanel-flikar suspenderas annars av Shiny och
+  ## slutar uppdateras tills fliken visas. Plottarna och statustexterna ska
+  ## fortsätta räknas om i bakgrunden så att resultat och återkoppling syns
+  ## direkt när en simulering blir klar, oavsett vilken flik som är aktiv.
+  for (out_id in c("plot_time_series", "plot_cross_section", "plot_accumulated",
+                   "queue_status", "progress_bar")) {
+    try(outputOptions(output, out_id, suspendWhenHidden = FALSE), silent = TRUE)
+  }
+  for (scen in 1:n_scen_max) {
+    try(outputOptions(output, paste0("log_text_", scen),
+                      suspendWhenHidden = FALSE), silent = TRUE)
+  }
   
 } # End server
 
