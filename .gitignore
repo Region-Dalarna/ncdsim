@@ -1,11 +1,23 @@
-.Rproj.user
-.Rhistory
-.RData
-.Ruserdata
+# R / RStudio
 .Rproj.user/
 .Rhistory
 .RData
 .Ruserdata
-.Rhistory
 .Rapp.history
 
+# Runtime data (Shiny körningar)
+runs/
+scenarios/
+
+# Om de råkar hamna under UI/
+UI/runs/
+UI/scenarios/
+
+# Data som genereras under körning
+*.rda
+*.log
+*.tmp
+
+# (valfritt) lock/queue filer om du kör filkö igen
+*.lock
+queue/
