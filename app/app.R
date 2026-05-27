@@ -1378,6 +1378,8 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
   
   ## Create custom x-axis breaks and labels
   
+  ts_xlim <- NULL   # x-axelns fasta omfång, sätts bara för tidsserier
+  
   if (plot_type == "ts") {
     xlab_custom <- switch(lang, "eng" = "Year", "swe" = "År")
     year_min <- years[1]
@@ -1387,6 +1389,7 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
     } else {
       x_breaks <- seq(from = year_min, to = year_max, by = 5)
     }
+    ts_xlim <- c(year_min, year_max)
   } else if (plot_type == "cs") {
     xlab_custom <- switch(lang, "eng" = "Age", "swe" = "Ålder")
     x_breaks <- seq(0, 100, 5)
@@ -1403,7 +1406,8 @@ create_plot <- function(dat_list, plot_type, var_to_plot, group, measure, years,
             axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) +
       scale_x_continuous(breaks = x_breaks) +
       scale_y_continuous(labels = format_fun) +
-      coord_cartesian(ylim = ylim_custom) +
+      coord_cartesian(ylim = ylim_custom,
+                      xlim = ts_xlim) +   # fast x-axel för ts (NULL = auto för cs)
       aes_x + 
       aes_group + 
       labs(title = title_custom, y = ylab_custom, x = xlab_custom)
@@ -1485,6 +1489,23 @@ dequeue_job <- function(job_id) {
   q <- data.table::fread(QUEUE_FILE)
   q <- q[q$job_id != job_id, ]
   data.table::fwrite(q, QUEUE_FILE)
+}
+
+## Ta bort alla köade jobb för en viss session + scenario, och städa deras
+## params-filer. Används vid stopp/rensa så att inga gamla jobb ligger kvar i
+## kön och blockerar omstart. Returnerar de borttagna job_id:na.
+dequeue_scen <- function(session_id, scen) {
+  if (!file.exists(QUEUE_FILE)) return(character(0))
+  q <- data.table::fread(QUEUE_FILE, colClasses = list(character = "job_id"))
+  if (nrow(q) == 0) return(character(0))
+  hit <- q$session_id == session_id & q$scen == scen
+  removed <- q$job_id[hit]
+  for (jid in removed) {
+    pf <- file.path(QUEUE_DIR, paste0(jid, ".rds"))
+    if (file.exists(pf)) file.remove(pf)
+  }
+  data.table::fwrite(q[!hit, ], QUEUE_FILE)
+  removed
 }
 
 queue_position <- function(job_id) {
@@ -2037,6 +2058,11 @@ server <- function(input, output, session) {
   
   last_log <- reactiveValues()
   
+  ## Lagrar starttid (Sys.time) och beräknad körtid (sekunder) per scenario,
+  ## för att kunna visa hur lång tid en körning tog i loggfönstret.
+  run_start_time <- reactiveValues()
+  run_duration   <- reactiveValues()
+  
   queued_job_id <- reactiveVal(NULL)
   queue_timer <- reactiveTimer(2000)
   
@@ -2314,8 +2340,30 @@ server <- function(input, output, session) {
                            "swe" = "Scenario aktivt"
         )
         
+        ## Formatera körtid (om uppmätt) som t.ex. "1 min 23 s" eller "45 s"
+        dur <- run_duration[[paste0("scen_", scen)]]
+        dur_text <- NULL
+        if (!is.null(dur) && is.finite(dur)) {
+          secs <- round(dur)
+          if (secs >= 60) {
+            mins <- secs %/% 60
+            rest <- secs %% 60
+            dur_text <- switch(lang,
+                               "eng" = paste0("Run time: ", mins, " min ", rest, " s"),
+                               "swe" = paste0("Körtid: ", mins, " min ", rest, " s"))
+          } else {
+            dur_text <- switch(lang,
+                               "eng" = paste0("Run time: ", secs, " s"),
+                               "swe" = paste0("Körtid: ", secs, " s"))
+          }
+        }
+        
         output[[outputId]] <- renderUI({
-          tags$div(style = "color:#d4d4d4;", log_text)
+          tags$div(
+            tags$div(style = "color:#d4d4d4;", log_text),
+            if (!is.null(dur_text))
+              tags$div(style = "color:#868e96; font-size:12px;", dur_text)
+          )
         })
         
       }
@@ -2362,13 +2410,14 @@ server <- function(input, output, session) {
         ## vector and so we should account for that
         data_file <- dir(data_path)
         if (length(data_file) == 1) {
-          ## Load data and assign to reactive data list
-          
+          ## Load data and assign to reactive data list.
+          ## OBS: workern skriver en ny .rda varje år och tar bort föregående.
+          ## Om pollningen råkar ske mitt under en filskrivning/-borttagning blir
+          ## det ett "error reading from connection". Det är ofarligt och
+          ## självläkande – nästa poll (om några sekunder) läser filen korrekt.
+          ## Vi hoppar därför tyst över och försöker igen, utan skrämmande text.
           tmp <- tryCatch(load(file.path(data_path, data_file)), 
-                          error = function(e) {
-                            cat("Problem reading simulation data. If the simulations stops entirely, stop/clear the simulation and restart. Error message: ", 
-                                e$message) }
-          )
+                          error = function(e) NULL)
           
           ## Proceed with this scenario only if data loading worked
           if (is.null(tmp) == FALSE) {
@@ -2388,6 +2437,12 @@ server <- function(input, output, session) {
             dat_base[[paste0("scen_", scen)]] <- dat
             ## Check if loaded data was the last year and if so update sim_status()
             if(dat[.N, s_pop!=0]) {
+              ## Beräkna körtid om vi har en starttid för detta scenario
+              st <- run_start_time[[paste0("scen_", scen)]]
+              if (!is.null(st)) {
+                run_duration[[paste0("scen_", scen)]] <-
+                  as.numeric(difftime(Sys.time(), st, units = "secs"))
+              }
               sim_status(replace(sim_status(), scen, "active"))
               clear_running(scen)
               ## Activate baseline if a baseline run was completed
@@ -3123,6 +3178,18 @@ server <- function(input, output, session) {
       clear_scen(scen, input=input, sim_status = sim_status, dat_base = dat_base, 
                  baseline_active = baseline_active, 
                  session_id = session_id)
+      
+      ## Städa köstatus så att scenariot kan startas om utan att fastna i kön:
+      ## 1) frigör scenariots lås (annars ser queue_timer servern som upptagen),
+      ## 2) ta bort eventuella köade jobb för detta scenario,
+      ## 3) nollställ queued_job_id om det pekar på ett jobb för detta scenario.
+      clear_running(scen)
+      removed <- dequeue_scen(session_id, scen)
+      jid <- queued_job_id()
+      if (!is.null(jid) && jid %in% removed) queued_job_id(NULL)
+      ## Nollställ även ev. körtidsmätning
+      run_start_time[[paste0("scen_", scen)]] <- NULL
+      run_duration[[paste0("scen_", scen)]] <- NULL
     })
   })
   
@@ -3178,6 +3245,7 @@ server <- function(input, output, session) {
     # men spara förra statusen så vi kan rulla tillbaka om run_scen avbryter.
     prev_status <- sim_status()
     set_running(scen_to_run, job_id)
+    run_start_time[[paste0("scen_", scen_to_run)]] <- Sys.time()
     sim_status(replace(sim_status(), scen_to_run, "run"))
     
     started <- run_scen(
@@ -3220,12 +3288,25 @@ server <- function(input, output, session) {
   ## Plots
   ##############################################################################
   
+  ## Hjälpfunktion: filtrera bort ännu ej beräknade år (s_pop == 0) ur varje
+  ## scenarios data, så att diagram kan ritas progressivt under körning utan att
+  ## kurvan faller till noll för framtida år. Behåller all redan beräknad data.
+  drop_unfilled_years <- function(dat_list) {
+    lapply(dat_list, function(d) {
+      if (is.null(d) || !("s_pop" %in% names(d))) return(d)
+      keep_years <- d[s_pop != 0, unique(year)]
+      if (length(keep_years) == 0) return(NULL)
+      d[year %in% keep_years]
+    })
+  }
+  
   output$plot_time_series <- renderPlotly({
     
-    req(sim_status()[[1]] != "run")            # börja rita diagram när all data är beräknad
+    ## Rita progressivt: vänta INTE på att hela simuleringen är klar. Plotten
+    ## ritas om varje gång datainläsaren lägger in ett nytt års data i dat_base.
     
     ## Extract reactive data object as a normal list
-    dat_list <- reactiveValuesToList(dat_base)
+    dat_list <- drop_unfilled_years(reactiveValuesToList(dat_base))
     
     ## Plot only if there is some baseline data
     if (is.null(dat_list[["scen_1"]])) return(NULL)
@@ -3251,42 +3332,54 @@ server <- function(input, output, session) {
   output$plot_cross_section <- renderPlotly({
     
     ## Extract reactive data object as a normal list
-    dat_list <- reactiveValuesToList(dat_base)
+    dat_list <- drop_unfilled_years(reactiveValuesToList(dat_base))
     
     ## Plot only if there is some baseline data and years slider loaded
     if (is.null(dat_list[["scen_1"]])) return(NULL)
     if (is.null(input$slider_year_cs_plot)) return(NULL)
     
-    create_plot(dat_list = dat_list,
-                plot_type = "cs",
-                var_to_plot = input$cs_var_to_plot,
-                group = input$cs_group, 
-                measure = input$cs_measure,
-                years = input$slider_year_cs_plot,
-                var_list = var_list,
-                var_labels = var_labels,
-                input = input)
+    tryCatch(
+      create_plot(dat_list = dat_list,
+                  plot_type = "cs",
+                  var_to_plot = input$cs_var_to_plot,
+                  group = input$cs_group, 
+                  measure = input$cs_measure,
+                  years = input$slider_year_cs_plot,
+                  var_list = var_list,
+                  var_labels = var_labels,
+                  input = input),
+      error = function(e) {
+        cat("Fel vid skapande av tvärsnittsdiagram:", conditionMessage(e), "\n")
+        NULL
+      }
+    )
   })
   
   output$plot_accumulated <- renderPlotly({
     
     ## Extract reactive data object as a normal list
-    dat_list <- reactiveValuesToList(dat_base)
+    dat_list <- drop_unfilled_years(reactiveValuesToList(dat_base))
     
     ## Plot only if there is some baseline data and years slider loaded
     if (is.null(dat_list[["scen_1"]])) return(NULL)
     if (is.null(input$slider_years_acc_plot)) return(NULL)
     
-    create_plot(dat_list = dat_list,
-                plot_type = "acc",
-                var_to_plot = input$acc_var_to_plot,
-                group = input$acc_group, 
-                measure = input$acc_measure,
-                years = input$slider_years_acc_plot,
-                age_limits_custom = input$slider_age_custom_acc_plot,
-                var_list = var_list,
-                var_labels = var_labels,
-                input = input)
+    tryCatch(
+      create_plot(dat_list = dat_list,
+                  plot_type = "acc",
+                  var_to_plot = input$acc_var_to_plot,
+                  group = input$acc_group, 
+                  measure = input$acc_measure,
+                  years = input$slider_years_acc_plot,
+                  age_limits_custom = input$slider_age_custom_acc_plot,
+                  var_list = var_list,
+                  var_labels = var_labels,
+                  input = input),
+      error = function(e) {
+        cat("Fel vid skapande av ackumulerat diagram:", conditionMessage(e), "\n")
+        NULL
+      }
+    )
   })
   
   
